@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.5.0 (2026-11-17)
+
+- New tabs for where things come from, read from the server's data: World Gen (ore height graphs), Block Drops,
+  Mob Drops (the mob drawn, its spawns, XP and drops), Chest Loot, Archaeology, Fishing, Piglin Bartering, Shearing,
+  Villager Trades, Other Sources and How To Get It.
+- Villager trades go to the professions that offer them (26.3's tags), with the profession's clothes, work station
+  and level name; structure-only mobs name their structure (shulkers: End Cities).
+- The item list is the creative inventory's: no operator or technical items, no uncraftable potions or tipped arrows.
+- Recipes with nothing to show, and blocks that simply drop themselves, have no card.
+- Smithing trims show the trimmed armour; loot counts are per stack (not times the rolls); concrete shows its powder
+  and water.
+- The recipe arrow is drawn clean (no dark box); long card lines end in "…"; inventory tooltips no longer draw under
+  the recipe window.
+- Known, in Sunrise: on the pinned Nightly some mobs drawn in the window lose faces (chicken legs) or show their body
+  through their clothes (villagers). Fixed in Sunrise by sunrise-org/sunrise#2365; JEI needs no change for it.
+
 ## 0.4.0 (2026-11-17)
 
 - First release for Sunrise: pinned to the Nightly of 2026-11-16 (game commit `234db8df62`), built from Sunrise's

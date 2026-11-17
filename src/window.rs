@@ -7,8 +7,20 @@ use crate::state::{Action, Jei, Target, Window, inside};
 use crate::view::{Card, Focus, Role};
 use crate::{bookmarks, displays, tr};
 use mod_api::*;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// The open window's rectangle this frame, for `render_tooltip_pre`: a tooltip the screen behind hangs from a slot
+/// under the window would draw under it, so it is not drawn (as JEI's own recipe screen leaves the inventory
+/// unhovered). Kept apart from `Jei`, whose lock is held while the window draws.
+pub(crate) static OPEN_RECT: Mutex<Option<[f32; 4]>> = Mutex::new(None);
+/// Set while the window draws its own tooltip, which the hook must let through.
+pub(crate) static OWN_TOOLTIP: AtomicBool = AtomicBool::new(false);
 
 const SLOT: f32 = 18.0;
+/// A recipe's box: its padding round the card, and the room between two boxes.
+const PAD: f32 = 5.0;
+const GAP: f32 = 2.0 * PAD + 6.0;
 const TAB: f32 = 24.0;
 const BORDER: u32 = 0xFF00_0000;
 const FACE: u32 = 0xFFC6_C6C6;
@@ -30,20 +42,126 @@ pub(crate) fn panel(draw: &mut dyn DrawContext, r: [f32; 4]) {
 }
 
 pub(crate) fn slot_frame(draw: &mut dyn DrawContext, at: [f32; 2]) {
-    if !draw.sprite("horizon/jei/slot", [0.0, 0.0, 18.0, 18.0], [at[0], at[1], 18.0, 18.0], None) {
+    if !draw.sprite("sunrise/jei/slot", [0.0, 0.0, 18.0, 18.0], [at[0], at[1], 18.0, 18.0], None) {
         draw.fill([at[0], at[1], 18.0, 18.0], 0xFF37_3737);
         draw.fill([at[0] + 1.0, at[1] + 1.0, 17.0, 17.0], 0xFFFF_FFFF);
         draw.fill([at[0] + 1.0, at[1] + 1.0, 16.0, 16.0], 0xFF8B_8B8B);
     }
 }
 
+/// World Gen's graph: one bar per block of height, the world's bottom on the left, scaled to the fullest layer;
+/// the pointer over it says the Y and the share there.
+fn draw_graph(draw: &mut dyn DrawContext, g: &crate::view::Graph, at: [f32; 2], mouse: [f32; 2], targets: &mut Vec<([f32; 4], Target)>) {
+    // Just Enough Resources' graph: red bars over the card, an axis on the left and the bottom, Y labels under it.
+    let [gx, gy, gw, gh] = g.rect;
+    let (gx, gy) = (at[0] + gx, at[1] + gy);
+    let most = g.values.iter().copied().fold(0.0f32, f32::max);
+    draw.fill([gx, gy, 1.0, gh], 0xFF40_4040);
+    draw.fill([gx, gy + gh, gw, 1.0], 0xFF40_4040);
+    if most <= 0.0 || g.values.is_empty() {
+        return;
+    }
+    let n = g.values.len() as f32;
+    let cols = (gw - 2.0).floor().max(1.0) as usize;
+    for c in 0..cols {
+        // Each column takes the fullest layer it covers.
+        let from = (c as f32 / cols as f32 * n) as usize;
+        let to = (((c + 1) as f32 / cols as f32 * n) as usize).max(from + 1).min(g.values.len());
+        let v = g.values[from..to].iter().copied().fold(0.0f32, f32::max);
+        let h = (v / most * (gh - 2.0)).round();
+        if h > 0.0 {
+            draw.fill([gx + 2.0 + c as f32, gy + gh - h, 1.0, h], 0xFFE0_1010);
+        }
+    }
+    // Y under the axis, at a few even steps.
+    let span = (g.top - g.bottom).max(1) as f32;
+    let steps = 4;
+    for i in 0..=steps {
+        let t = i as f32 / steps as f32;
+        let yv = g.bottom + (t * span).round() as i32;
+        let label = format!("{yv}");
+        let lw = draw.text_width(&label);
+        let lx = (gx + 2.0 + t * (gw - 2.0) - lw / 2.0).clamp(gx, gx + gw - lw);
+        draw.fill([gx + 2.0 + t * (gw - 3.0), gy + gh + 1.0, 1.0, 2.0], 0xFF40_4040);
+        draw.text(&label, [lx, gy + gh + 4.0], TEXT, false);
+    }
+    if inside([gx, gy, gw, gh], mouse) {
+        let i = ((((mouse[0] - gx - 2.0) / (gw - 2.0)) * n) as usize).min(g.values.len() - 1);
+        targets.push(([gx, gy, gw, gh], Target::Hover(vec![format!("Y {}", g.bottom + i as i32), format!("{:.3}% of blocks", g.values[i])])));
+    }
+}
+
+/// The grey strip behind the category's title and the page count (JEI's title bars).
+fn bar(draw: &mut dyn DrawContext, r: [f32; 4]) {
+    let [x, y, w, h] = r;
+    draw.fill([x, y, w, h], 0xFF37_3737);
+    draw.fill([x + 1.0, y + 1.0, w - 2.0, h - 2.0], 0xFF8B_8B8B);
+}
+
+/// A recipe's box: a light inset frame round the card.
+fn card_box(draw: &mut dyn DrawContext, r: [f32; 4]) {
+    let [x, y, w, h] = r;
+    draw.fill([x, y, w, h], 0xFF9E_9E9E);
+    draw.fill([x + 1.0, y + 1.0, w - 1.0, h - 1.0], 0xFFE8_E8E8);
+    draw.fill([x + 1.0, y + 1.0, w - 2.0, h - 2.0], 0xFFC6_C6C6);
+}
+
+/// JEI's shapeless icon: two crossed arrows, 9x7.
+fn shapeless_icon(draw: &mut dyn DrawContext, at: [f32; 2]) {
+    let c = 0xFF70_7070;
+    for i in 0..7 {
+        let f = i as f32;
+        draw.fill([at[0] + f, at[1] + f, 1.0, 1.0], c);
+        draw.fill([at[0] + f, at[1] + 6.0 - f, 1.0, 1.0], c);
+    }
+    // The arrow heads on the right.
+    for (dx, dy) in [(5.0, 0.0), (6.0, 0.0), (6.0, 1.0), (5.0, 6.0), (6.0, 6.0), (6.0, 5.0)] {
+        draw.fill([at[0] + dx, at[1] + dy, 1.0, 1.0], c);
+    }
+}
+
+/// JEI's recipe arrow, 22x15: a flat grey shaft and head, as the crafting table's own arrow. Drawn as fills: the
+/// furnace's progress sprite, tinted, filled its transparent box too (a dark square behind the arrow).
+fn recipe_arrow(draw: &mut dyn DrawContext, at: [f32; 2]) {
+    let c = 0xFF8B_8B8B;
+    draw.fill([at[0], at[1] + 5.0, 14.0, 5.0], c);
+    for k in 0..8 {
+        let f = k as f32;
+        draw.fill([at[0] + 14.0 + f, at[1] + f, 1.0, 15.0 - 2.0 * f], c);
+    }
+}
+
+/// JEI's large output slot: a 26x26 frame (the crafting result's).
+fn big_frame(draw: &mut dyn DrawContext, at: [f32; 2]) {
+    draw.fill([at[0], at[1], 26.0, 26.0], 0xFF37_3737);
+    draw.fill([at[0] + 1.0, at[1] + 1.0, 25.0, 25.0], 0xFFFF_FFFF);
+    draw.fill([at[0] + 1.0, at[1] + 1.0, 24.0, 24.0], 0xFF8B_8B8B);
+}
+
 fn button(draw: &mut dyn DrawContext, r: [f32; 4], hover: bool, enabled: bool) {
-    let name = if !enabled { "horizon/jei/button_disabled_v2" } else if hover { "horizon/jei/button_highlight_v2" } else { "horizon/jei/button_enabled_v2" };
+    // JEI's button: a dark outline, a light bevel, a grey face (blue-tinted under the pointer).
+    let [x, y, w, h] = r;
+    draw.fill([x, y, w, h], 0xFF00_0000);
+    let (face, light, dark) = if !enabled {
+        (0xFF6C_6C6C, 0xFF80_8080, 0xFF50_5050)
+    } else if hover {
+        (0xFF8C_96D8, 0xFFBF_C8FF, 0xFF5A_639E)
+    } else {
+        (0xFF9C_9C9C, 0xFFE0_E0E0, 0xFF58_5858)
+    };
+    draw.fill([x + 1.0, y + 1.0, w - 2.0, h - 2.0], dark);
+    draw.fill([x + 1.0, y + 1.0, w - 3.0, h - 3.0], light);
+    draw.fill([x + 2.0, y + 2.0, w - 4.0, h - 4.0], face);
+}
+
+#[allow(dead_code)]
+fn button_sprite(draw: &mut dyn DrawContext, r: [f32; 4], hover: bool, enabled: bool) {
+    let name = if !enabled { "sunrise/jei/button_disabled_v2" } else if hover { "sunrise/jei/button_highlight_v2" } else { "sunrise/jei/button_enabled_v2" };
     draw.gui_nine_slice(name, r, 0xFFFF_FFFF);
 }
 
 fn arrow_icon(draw: &mut dyn DrawContext, at: [f32; 2], next: bool) {
-    let name = if next { "horizon/jei/icons/arrow_next_v2" } else { "horizon/jei/icons/arrow_previous_v2" };
+    let name = if next { "sunrise/jei/icons/arrow_next_v2" } else { "sunrise/jei/icons/arrow_previous_v2" };
     if !draw.sprite(name, [0.0, 0.0, 9.0, 7.0], [at[0], at[1], 9.0, 7.0], None) {
         draw.text(if next { ">" } else { "<" }, at, 0xFFFF_FFFF, true);
     }
@@ -114,6 +232,7 @@ fn card_height(card: &Card, draw: &dyn DrawContext, host: &dyn ClientHost) -> f3
 pub(crate) fn draw(jei: &mut Jei, host: &dyn ClientHost, draw: &mut dyn DrawContext, mouse: [f32; 2]) {
     jei.targets.clear();
     jei.window_rect = None;
+    *OPEN_RECT.lock().unwrap_or_else(|e| e.into_inner()) = None;
     bookmarks::draw(jei, host, draw, mouse);
     let Some(w) = jei.window.clone() else { return };
     let [sw, sh] = draw.size();
@@ -134,16 +253,25 @@ pub(crate) fn draw(jei: &mut Jei, host: &dyn ClientHost, draw: &mut dyn DrawCont
             pages.push(i);
             used = 0.0;
         }
-        used += h + 8.0;
+        used += h + GAP;
         fullest = fullest.max(used - 8.0);
     }
-    let height = (40.0 + fullest + 8.0).clamp(110.0, most.max(110.0));
-    let (x0, y0) = (((sw - width) / 2.0).floor(), (TAB + 4.0 + (sh - TAB - 8.0 - height) / 2.0).floor());
+    let mut height = (40.0 + fullest + 8.0).clamp(110.0, most.max(110.0));
+    let mut width = width;
+    let (mut x0, mut y0) = (((sw - width) / 2.0).floor(), (TAB + 4.0 + (sh - TAB - 8.0 - height) / 2.0).floor());
+    // JEI's recipe screen takes the container's place: the window covers the container (the screen under it stays
+    // drawn, so the game's item panel beside it stays live), centred on it.
+    if let Some([sx, sy, sw_, sh_]) = jei.screen_rect {
+        width = width.max(sw_ + 8.0).min(sw - 50.0);
+        height = height.max(sh_ + 8.0).min(sh - TAB - 8.0);
+        x0 = (sx + sw_ / 2.0 - width / 2.0).floor().max(26.0);
+        y0 = (sy + sh_ / 2.0 - height / 2.0).floor().max(TAB + 4.0);
+    }
     let r = [x0, y0, width, height];
     jei.window_rect = Some([x0 - 26.0, y0 - TAB, width + 26.0, height + TAB]);
-    // Dim the screen under it, but not the item panel right of the container (JEI's list stays lit).
-    let dim_right = jei.screen_rect.map(|s| (s[0] + s[2] + 4.0).max(x0 + width + 2.0)).unwrap_or(sw).min(sw);
-    draw.fill([0.0, 0.0, dim_right, sh], 0x8010_1010);
+    *OPEN_RECT.lock().unwrap_or_else(|e| e.into_inner()) = jei.window_rect;
+    // The window covers the container; the game's background dim and `screen_render_background`'s strip dim the
+    // world behind it, and the item panel stays lit beside it.
     // Tabs above the window, as many as fit; the selected one joins the window.
     let per = (((width - 8.0) / TAB).floor() as usize).max(1);
     let first = (w.tab / per) * per;
@@ -173,12 +301,13 @@ pub(crate) fn draw(jei: &mut Jei, host: &dyn ClientHost, draw: &mut dyn DrawCont
         arrow_icon(draw, [rect[0] + 2.0, rect[1] + 3.0], next);
         jei.targets.push((rect, target));
     }
+    bar(draw, [x0 + 20.0, row, width - 40.0, 13.0]);
     let title = tr(host, &category.title, &category.title);
     let tw = draw.text_width(&title);
-    draw.text(&title, [x0 + (width - tw) / 2.0, row + 3.0], TEXT, false);
+    draw.text(&title, [x0 + (width - tw) / 2.0, row + 3.0], 0xFFFF_FFFF, true);
     jei.targets.push(([x0 + (width - tw) / 2.0, row, tw, 12.0], Target::Title));
     // Cards that fit, then the page row.
-    let top = row + 34.0;
+    let top = row + 34.0 + PAD;
     let page = w.page.min(pages.len() - 1);
     if let Some(win) = jei.window.as_mut() {
         win.page = page;
@@ -192,9 +321,10 @@ pub(crate) fn draw(jei: &mut Jei, host: &dyn ClientHost, draw: &mut dyn DrawCont
         arrow_icon(draw, [rect[0] + 2.0, rect[1] + 3.0], next);
         jei.targets.push((rect, target));
     }
+    bar(draw, [x0 + 20.0, page_row, width - 40.0, 13.0]);
     let label = format!("{}/{}", page + 1, pages.len());
     let lw = draw.text_width(&label);
-    draw.text(&label, [x0 + (width - lw) / 2.0, page_row + 3.0], TEXT, false);
+    draw.text(&label, [x0 + (width - lw) / 2.0, page_row + 3.0], 0xFFFF_FFFF, true);
     // Catalysts down the left side (JEI's `RecipeCatalysts`).
     if !category.catalysts.is_empty() {
         let n = category.catalysts.len().min(((height - 8.0) / SLOT) as usize);
@@ -214,8 +344,10 @@ pub(crate) fn draw(jei: &mut Jei, host: &dyn ClientHost, draw: &mut dyn DrawCont
         let card = jei.cards[*ci].clone();
         let h = heights[start + k];
         let x = x0 + ((width - card.size[0]) / 2.0).floor();
+        // Each recipe in a box of its own, as JEI draws them.
+        card_box(draw, [x - PAD, y - PAD, card.size[0] + 2.0 * PAD, h + 2.0 * PAD]);
         draw_card(jei, host, draw, &card, [x, y], h, mouse, &mut checks);
-        y += h + 8.0;
+        y += h + GAP;
     }
     if !checks.is_empty() {
         jei.actions.push(Action::Check(checks));
@@ -252,9 +384,16 @@ fn draw_card(jei: &mut Jei, host: &dyn ClientHost, draw: &mut dyn DrawContext, c
         // "+" is offered and the server's part answers the click.
         plus = Some((None, RecipeTransferResult::Moves));
     }
+    // JEI marks the missing ingredients only while the pointer is on "+".
+    let plus_rect = [x + card.size[0] + PAD + 3.0, y + h + PAD - 13.0, 13.0, 13.0];
+    if plus.is_none() || !inside(plus_rect, mouse) {
+        missing.clear();
+    }
     for s in &card.slots {
         let sx = [x + s.at[0] - 1.0, y + s.at[1] - 1.0];
-        if !card.frameless {
+        if s.big {
+            big_frame(draw, [sx[0] - 4.0, sx[1] - 4.0]);
+        } else if !card.frameless {
             slot_frame(draw, sx);
         }
         if s.cell.is_some_and(|c| missing.contains(&c)) && !s.stacks.is_empty() {
@@ -278,8 +417,11 @@ fn draw_card(jei: &mut Jei, host: &dyn ClientHost, draw: &mut dyn DrawContext, c
             jei.targets.push(([sx[0], sx[1], SLOT, SLOT], Target::Stack(item)));
         }
         if let Some(c) = s.chance.filter(|c| *c < 1.0) {
-            let t = format!("{}%", (c * 1000.0).round() / 10.0);
-            draw.text(&t, [sx[0], sx[1] + 19.0], TEXT, false);
+            // Short, as JER writes them: whole percents from 10 up, one decimal under.
+            let pct = c * 100.0;
+            let t = if pct >= 9.95 { format!("{pct:.0}%") } else if pct >= 0.95 { format!("{pct:.1}%") } else if pct >= 0.1 { format!("{pct:.1}%").trim_start_matches('0').to_owned() } else { "<.1%".to_owned() };
+            let tw = draw.text_width(&t);
+            draw.text(&t, [sx[0] + ((18.0 - tw) / 2.0).floor(), sx[1] + 19.0], TEXT, false);
         }
     }
     for wl in &card.wells {
@@ -335,14 +477,10 @@ fn draw_card(jei: &mut Jei, host: &dyn ClientHost, draw: &mut dyn DrawContext, c
         draw.sprite(sprite, *uv, [x + p[0], y + p[1], uv[2], uv[3]], None);
     }
     if let Some(a) = card.arrow {
-        let ok = draw.sprite("gui/sprites/container/furnace/burn_progress", [0.0, 0.0, 24.0, 16.0], [x + a[0], y + a[1], 24.0, 16.0], Some(0xFF80_8080))
-            || draw.sprite("minecraft:container/furnace/burn_progress", [0.0, 0.0, 24.0, 16.0], [x + a[0], y + a[1], 24.0, 16.0], Some(0xFF80_8080));
-        if !ok {
-            draw.text("->", [x + a[0] + 6.0, y + a[1] + 4.0], TEXT, false);
-        }
+        recipe_arrow(draw, [x + a[0] + 1.0, y + a[1]]);
     }
     if card.shapeless {
-        draw.text("~", [x + card.size[0] - 8.0, y], TEXT, false);
+        shapeless_icon(draw, [x + card.size[0] - 6.0, y - PAD + 2.0]);
     }
     let mut info_y = y + 24.0;
     for (p, t, colour) in &card.texts {
@@ -353,18 +491,42 @@ fn draw_card(jei: &mut Jei, host: &dyn ClientHost, draw: &mut dyn DrawContext, c
                 info_y += 10.0;
             }
         } else {
-            draw.text(&text, [x + p[0], y + p[1]], *colour, false);
+            // A line wider than the card (a long loot table's name) ends in "…" at its edge; the whole line shows
+            // under the pointer.
+            let room = card.size[0] - p[0];
+            if draw.text_width(&text) <= room {
+                draw.text(&text, [x + p[0], y + p[1]], *colour, false);
+            } else {
+                let mut cut: String = text.clone();
+                while !cut.is_empty() && draw.text_width(&format!("{cut}…")) > room {
+                    cut.pop();
+                }
+                draw.text(&format!("{}…", cut.trim_end()), [x + p[0], y + p[1]], *colour, false);
+                jei.targets.push(([x + p[0], y + p[1] - 1.0, room, 10.0], Target::Hover(vec![text.clone()])));
+            }
         }
+    }
+    if let Some(g) = &card.graph {
+        draw_graph(draw, g, [x, y], mouse, &mut jei.targets);
+    }
+    if let Some((kind, snbt, r)) = &card.entity {
+        let rect = [x + r[0], y + r[1], x + r[0] + r[2], y + r[1] + r[3]];
+        let data = mod_api::Compound::new();
+        let entity = if snbt.is_empty() { GuiEntity::kind(kind.clone()) } else { GuiEntity::with_data(kind.clone(), crate::sources::client::snbt(snbt).unwrap_or(data)) };
+        // Feet a little above the box's bottom (small mobs' legs stay in), the tallest mobs still fit.
+        let size = (r[3] * 0.34).max(8.0);
+        let _ = draw.entity(&entity, GuiEntityView::new(rect, size, -0.35, GuiEntityLook::At(mouse)));
     }
     for (r, lines) in &card.hovers {
         jei.targets.push(([x + r[0], y + r[1], r[2], r[3]], Target::Hover(lines.clone())));
     }
     if let Some((display, result)) = plus {
-        let r = [x + card.size[0] + 4.0, y + h - 13.0, 13.0, 13.0];
+        let r = plus_rect;
         let ok = result == RecipeTransferResult::Moves;
         let usable = ok || result == RecipeTransferResult::Missing;
-        button(draw, r, inside(r, mouse) && ok, usable);
-        draw.text("+", [r[0] + 4.0, r[1] + 3.0], if ok { 0xFFFF_FFFF } else { 0xFFFF_6060 }, true);
+        button(draw, r, inside(r, mouse) && usable, usable);
+        let tw = draw.text_width("+");
+        draw.text("+", [r[0] + ((r[2] - tw) / 2.0).floor() + 0.5, r[1] + 3.0], if usable { 0xFFFF_FFFF } else { 0xFFA0_A0A0 }, true);
         jei.targets.push((r, Target::Plus(display, card.recipe.clone())));
     }
 }
@@ -423,7 +585,9 @@ fn tooltip(jei: &Jei, host: &dyn ClientHost, draw: &mut dyn DrawContext, mouse: 
         }
         _ => return,
     }
+    OWN_TOOLTIP.store(true, Ordering::Relaxed);
     let _ = draw.gui_tooltip(&lines, mouse);
+    OWN_TOOLTIP.store(false, Ordering::Relaxed);
 }
 
 /// JEI writes amounts in buckets and mB: 1.5 B, 250 mB.

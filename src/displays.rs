@@ -40,6 +40,17 @@ pub(crate) fn listener() -> Arc<Types> {
     Arc::new(Types)
 }
 
+/// The recipe type a vanilla serializer's recipes are listed under; any other type is its own.
+fn recipe_type(serializer: &str) -> &str {
+    if serializer.starts_with("minecraft:crafting_") {
+        "minecraft:crafting"
+    } else if serializer.starts_with("minecraft:smithing_") {
+        "minecraft:smithing"
+    } else {
+        serializer
+    }
+}
+
 /// How many book displays a recipe has (`Recipe.display()`), as the fork's `RecipeIndex` counts them.
 fn displays(kind: &str, json: &Value) -> i32 {
     if kind.starts_with("minecraft:crafting_special_") || kind == "minecraft:crafting_decorated_pot" || kind == "minecraft:brewing" {
@@ -61,9 +72,15 @@ pub(crate) fn table(host: &dyn Host) -> String {
     let types: Vec<String> = TYPES.lock().unwrap_or_else(|e| e.into_inner()).iter().cloned().collect();
     // (path.json, namespace, displays, crafting)
     let mut all: Vec<(String, String, i32, bool)> = Vec::new();
-    for kind in &types {
-        let crafting = kind.starts_with("minecraft:crafting");
-        for r in host.recipes_of_type(kind).iter() {
+    // The files name serializers; Sunrise lists recipes by their recipe type (`crafting_shaped` is under
+    // `minecraft:crafting`), so each type is read once and every recipe tells its serializer by its `type`.
+    let mut lookups: Vec<&str> = types.iter().map(|k| recipe_type(k)).collect();
+    lookups.sort();
+    lookups.dedup();
+    for lookup in lookups {
+        for r in host.recipes_of_type(lookup).iter() {
+            let kind = crate::vanilla::serializer(r);
+            let crafting = kind.starts_with("minecraft:crafting");
             let (ns, path) = r.id.split_once(':').unwrap_or(("minecraft", &r.id));
             all.push((format!("{path}.json"), ns.to_owned(), displays(kind, &r.json), crafting));
         }

@@ -71,6 +71,8 @@ pub(crate) struct Jei {
     pub cards: Vec<Card>,
     /// (providers' version, recipes received) the index was made from.
     pub built: Option<(u64, u64)>,
+    /// Whether the panel's items came from the creative tabs; until they do, each check looks for the tabs again.
+    pub from_tabs: bool,
     pub received: u64,
     pub window: Option<Window>,
     pub history: Vec<Window>,

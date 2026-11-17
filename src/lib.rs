@@ -15,6 +15,7 @@
 //! window, over the open screen (`screen_render_post` and the `screen_*_pre` input hooks), and the bookmark bar.
 
 pub mod api;
+mod sources;
 mod bookmarks;
 mod displays;
 mod provider;
@@ -32,6 +33,9 @@ use view::Focus;
 pub(crate) const ID: &str = "jei";
 
 /// A translation, or the fallback when no language has the key.
+/// A screen's background dim (`Screen.renderTransparentBackground`: 16, 16, 16 at 160 of 255).
+const DIM: u32 = 0xA010_1010;
+
 pub(crate) fn tr(host: &dyn ClientHost, key: &str, fallback: &str) -> String {
     host.translate(key).unwrap_or_else(|| fallback.to_owned())
 }
@@ -130,24 +134,90 @@ fn act_on(jei: &mut state::Jei, act: KeyAct, focus: Focus) {
     }
 }
 
+/// What the panel leaves out before the creative tabs load: the Operator Utilities tab's items and the items no tab
+/// shows.
+const TECHNICAL: [&str; 14] = [
+    "minecraft:command_block",
+    "minecraft:chain_command_block",
+    "minecraft:repeating_command_block",
+    "minecraft:command_block_minecart",
+    "minecraft:jigsaw",
+    "minecraft:structure_block",
+    "minecraft:structure_void",
+    "minecraft:barrier",
+    "minecraft:light",
+    "minecraft:debug_stick",
+    "minecraft:test_block",
+    "minecraft:test_instance_block",
+    "minecraft:knowledge_book",
+    "minecraft:petrified_oak_slab",
+];
+
+/// Whether a card has something to show, as JEI lists no recipe it can't draw: some slot or fluid filled, its inputs
+/// (when it has any) not all empty, nor its outputs, and a mob's card with at least one drop. A recipe whose items
+/// no client knows (a special recipe with no ingredients, a result from a missing mod) is left out.
+fn shows_something(card: &view::Card) -> bool {
+    use view::Role;
+    let has = |role: Role| card.slots.iter().any(|s| s.role == role);
+    let filled = |role: Role| card.slots.iter().any(|s| s.role == role && !s.stacks.is_empty());
+    if card.wells.iter().any(|w| !w.fluid.is_empty() && w.amount > 0) {
+        return true;
+    }
+    if !card.slots.iter().any(|s| !s.stacks.is_empty()) {
+        return false;
+    }
+    let input_ok = !has(Role::Input) || filled(Role::Input);
+    let output_ok = !has(Role::Output) || filled(Role::Output);
+    input_ok && output_ok && (card.entity.is_none() || filled(Role::Output))
+}
+
 /// Makes the index again when the providers' files or the server's recipes changed.
 fn ensure_index(host: &dyn ClientHost) {
-    let version = provider::VERSION.load(std::sync::atomic::Ordering::SeqCst) + (api::with(|r| r.version) << 32);
-    let (built, received) = with(|j| (j.built, j.received));
-    if built == Some((version, received)) {
+    let version = provider::VERSION.load(std::sync::atomic::Ordering::SeqCst)
+        + (api::with(|r| r.version) << 32)
+        + (sources::client::VERSION.load(std::sync::atomic::Ordering::SeqCst) << 48);
+    // The recipes can reach the client after the first frames of a world, and `recipes_received` does not always
+    // follow: the index is also rebuilt when the number of recipes the client lists changes.
+    let listed: u64 = vanilla::CATEGORIES
+        .iter()
+        .flat_map(|(_, _, _, kinds)| kinds.iter())
+        .map(|k| host.recipes_of_type(k).len() as u64)
+        .sum();
+    let received = with(|j| j.received) ^ (listed << 20);
+    let built = with(|j| j.built);
+    if built == Some((version, received)) && (with(|j| j.from_tabs) || host.creative_tabs().tabs.is_empty()) {
         return;
     }
     let keys = host.item_keys();
     let ids: std::collections::HashMap<String, ItemKey> = keys.iter().map(|k| (k.id(host), *k)).collect();
-    let items: Vec<ItemKey> = keys.into_iter().filter(|k| k.id(host) != "minecraft:air").collect();
+    // The panel lists what the creative inventory does, as JEI's own list is the search tab's items: an item no tab
+    // shows (the knowledge book, the petrified oak slab) is left out, and so is the Operator Utilities tab (command
+    // and structure blocks, the debug stick, barrier and light) whatever the player's permissions. Before the tabs
+    // load, every item but those.
+    let tabs = host.creative_tabs();
+    let shown: std::collections::HashSet<ItemKey> = tabs
+        .tabs
+        .iter()
+        .filter(|t| t.id != "minecraft:op_blocks")
+        .flat_map(|t| t.display_items.iter().map(|s| s.item()))
+        .collect();
+    let items: Vec<ItemKey> = keys
+        .into_iter()
+        .filter(|k| {
+            let id = k.id(host);
+            id != "minecraft:air" && if shown.is_empty() { !TECHNICAL.contains(&id.as_str()) } else { shown.contains(k) }
+        })
+        .collect();
     let fuels: Vec<ItemKey> = items.iter().copied().filter(|k| host.item_burn_time(*k).unwrap_or(0) > 0).collect();
     // The panel's entries: potions and enchanted books as one stack per potion and per enchantment level.
-    let entries = subtypes::entries(host, &items);
+    let entries = subtypes::entries(host, &items, &tabs);
     let cx = vanilla::Ctx { host, ids: &ids, fuels: &fuels };
     let mut categories = vanilla::categories(&cx);
     let mut cards = vanilla::cards(&cx);
     provider::add(&cx, &mut categories, &mut cards);
     provider::add_api(&cx, &mut categories, &mut cards);
+    sources::client::add(&cx, &mut categories, &mut cards);
+    cards.retain(shows_something);
     // A category nothing fills is left out of the tabs (it has no cards to show).
     let subtypes: std::collections::HashMap<ItemKey, String> =
         api::with(|r| r.subtypes.clone()).into_iter().filter_map(|(i, c)| ids.get(&i).map(|k| (*k, c))).collect();
@@ -161,6 +231,7 @@ fn ensure_index(host: &dyn ClientHost) {
         j.categories = categories;
         j.cards = cards;
         j.built = Some((version, received));
+        j.from_tabs = !shown.is_empty();
         j.window = None;
         j.history.clear();
         j.actions.push(Action::Panel);
@@ -185,6 +256,12 @@ impl Hooks for Mod {
             std::sync::Arc::new(displays::FromClient),
             Some(std::sync::Arc::new(displays::FromServer)),
         );
+        // jei:sources both ways: a client's "?" asks for the sources' index, the server answers in parts.
+        r.payload_handlers().registrar("1").play_bidirectional(
+            PayloadId(sources::server::CHANNEL.into()),
+            std::sync::Arc::new(sources::server::FromClient),
+            Some(std::sync::Arc::new(sources::client::FromServer)),
+        );
     }
 
     fn add_client_reload_listeners(&self, _host: &dyn ClientHost, event: &mut AddClientReloadListenersEvent<'_>) {
@@ -199,10 +276,12 @@ impl Hooks for Mod {
         if let Err(e) = event.listeners.add_listener(id, conv, displays::listener()) {
             eprintln!("[jei] recipe types not read: {e:?}");
         }
+        sources::server::listen(event);
     }
 
     fn player_logged_in(&self, host: &mut dyn ServerHost, event: &mut PlayerLoggedInEvent<'_>) {
         displays::send(host, event.player);
+        sources::server::warm();
     }
 
     fn client_player_logging_in(&self, _host: &mut dyn ClientHost, _event: &mut ClientPlayerLoggingInEvent) {
@@ -210,6 +289,7 @@ impl Hooks for Mod {
             j.in_world = true;
             j.built = None;
         });
+        sources::client::forget();
     }
 
     fn client_player_logging_out(&self, _host: &mut dyn ClientHost, _event: &mut ClientPlayerLoggingOutEvent) {
@@ -232,6 +312,7 @@ impl Hooks for Mod {
         }
         ensure_index(host);
         let millis = host.millis();
+        sources::client::request(host, millis);
         // No display table yet: ask the server, every five seconds.
         if displays::DISPLAYS.lock().unwrap_or_else(|e| e.into_inner()).is_none()
             && with(|j| {
@@ -323,6 +404,40 @@ impl Hooks for Mod {
         });
     }
 
+    /// A container screen's dark background, drawn by JEI edge to edge in one even layer (vanilla's
+    /// `renderTransparentBackground` colour): the game's own leaves the item panel's strip lit and doesn't reach
+    /// the world beside JEI's window, so it is turned off here and `screen_render_pre` draws one over the window.
+    fn screen_transparent_background(&self, _host: &dyn ClientHost, event: &mut ScreenTransparentBackgroundEvent<'_>) -> Flow {
+        let container = event.screen == "inventory" || event.screen == "creative";
+        if !container {
+            return Flow::Continue;
+        }
+        Flow::Cancel
+    }
+
+    /// A tooltip the screen behind hangs from a point under JEI's open window (an inventory slot's) is not drawn:
+    /// it would draw under the window. JEI's own tooltips pass.
+    fn render_tooltip_pre(&self, _host: &dyn ClientHost, event: &mut RenderTooltipPreEvent<'_>) -> Flow {
+        if window::OWN_TOOLTIP.load(std::sync::atomic::Ordering::Relaxed) {
+            return Flow::Continue;
+        }
+        let at = [event.place.x as f32, event.place.y as f32];
+        let under = window::OPEN_RECT.lock().unwrap_or_else(|e| e.into_inner()).is_some_and(|r| state::inside(r, at));
+        if under { Flow::Cancel } else { Flow::Continue }
+    }
+
+    /// The even dark background in its place, before the screen, the panel and JEI's window draw over it.
+    fn screen_render_pre(&self, _host: &dyn ClientHost, event: &mut ScreenRenderPreEvent<'_>) -> Flow {
+        if event.screen.id == "inventory" || event.screen.id == "creative" {
+            let [w, h] = event.draw.size();
+            event.draw.fill([0.0, 0.0, w, h], DIM);
+        } else {
+            // The window draws only over these screens: another screen's tooltips stay.
+            *window::OPEN_RECT.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
+        Flow::Continue
+    }
+
     fn screen_render_post(&self, host: &dyn ClientHost, event: &mut ScreenRenderPostEvent<'_>) {
         let screen = event.screen;
         let container = screen.id == "inventory" || screen.id == "creative";
@@ -362,6 +477,18 @@ impl Hooks for Mod {
         let at = event.screen.mouse;
         with(|j| {
             if j.window.is_some() {
+                let over_window = j.window_rect.is_some_and(|r| state::inside(r, at));
+                if !over_window {
+                    // The item panel and the bookmarks stay live under JEI's window, as JEI's list does beside its
+                    // recipe screen: a click there shows that item's recipes in the open window (the panel's click
+                    // comes back as `panel_event`), and only a click on nothing closes it.
+                    if bookmarks::press(j, at, event.button, shift) {
+                        return Flow::Cancel;
+                    }
+                    if j.screen_rect.is_some_and(|s| at[0] >= s[0] + s[2]) {
+                        return Flow::Continue;
+                    }
+                }
                 window::click(j, at, event.button, shift);
                 return Flow::Cancel;
             }
@@ -371,7 +498,14 @@ impl Hooks for Mod {
 
     fn screen_mouse_button_released_pre(&self, _host: &dyn ClientHost, event: &mut ScreenMouseButtonReleasedPreEvent<'_>) -> Flow {
         let at = event.screen.mouse;
-        with(|j| if bookmarks::release(j, at) || j.window.is_some() { Flow::Cancel } else { Flow::Continue })
+        with(|j| {
+            if bookmarks::release(j, at) {
+                return Flow::Cancel;
+            }
+            // A release over the item panel goes to it, as its press did.
+            let on_panel = j.window_rect.is_none_or(|r| !state::inside(r, at)) && j.screen_rect.is_some_and(|s| at[0] >= s[0] + s[2]);
+            if j.window.is_some() && !on_panel { Flow::Cancel } else { Flow::Continue }
+        })
     }
 
     fn screen_mouse_dragged_pre(&self, _host: &dyn ClientHost, _event: &mut ScreenMouseDraggedPreEvent<'_>) -> Flow {
@@ -471,6 +605,17 @@ impl Hooks for Mod {
                     j.checks.iter().map(|(k, v)| (*k, v.result)).collect::<Vec<_>>()
                 )
             });
+            // Cards per category, and how many recipes the client lists per vanilla type.
+            let per = with(|j| {
+                j.categories.iter().enumerate()
+                    .map(|(i, c)| format!("{} {}", c.id, j.cards.iter().filter(|k| k.category == i).count()))
+                    .collect::<Vec<_>>().join(", ")
+            });
+            let _ = _host.chat_line(Text::literal(format!("[jei] cards: {per}")));
+            let kinds = ["minecraft:crafting", "minecraft:smithing", "minecraft:smelting"]
+                .iter().map(|k| format!("{k} {}", _host.recipes_of_type(k).len())).collect::<Vec<_>>().join(", ");
+            let _ = _host.chat_line(Text::literal(format!("[jei] recipes: {kinds}")));
+            let _ = _host.chat_line(Text::literal(format!("[jei] {}", sources::client::status())));
             let _ = _host.chat_line(Text::literal(line));
         } else if rest == "bookmarks clear" {
             with(|j| {
@@ -507,3 +652,31 @@ fn show_panel(host: &mut dyn ClientHost) {
     host.panel_items(ID, stacks);
 }
 
+
+#[cfg(test)]
+mod card_tests {
+    use super::*;
+    use view::{Card, Role, Well};
+
+    /// A recipe whose items no client knows is left out; a fluid alone is something to show.
+    #[test]
+    fn cards_with_nothing_to_show_are_left_out() {
+        assert!(!shows_something(&Card::new(0, [100.0, 40.0], "empty")));
+        let mut unresolved = Card::new(0, [100.0, 40.0], "minecraft:special");
+        unresolved.slot([0.0, 0.0], Role::Input, Vec::new());
+        unresolved.slot([40.0, 0.0], Role::Output, Vec::new());
+        assert!(!shows_something(&unresolved));
+        let mut fluid = Card::new(0, [100.0, 40.0], "melting");
+        fluid.slot([0.0, 0.0], Role::Input, Vec::new());
+        fluid.wells.push(Well {
+            rect: [40.0, 0.0, 16.0, 40.0],
+            role: Role::Output,
+            fluid: "minecraft:lava".into(),
+            amount: 1000,
+            capacity: 1000,
+            bare: false,
+            overlay: None,
+        });
+        assert!(shows_something(&fluid));
+    }
+}

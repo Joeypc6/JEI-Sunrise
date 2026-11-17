@@ -24,6 +24,8 @@ pub(crate) struct Slot {
     pub cell: Option<u32>,
     /// A chance under 1 is written under the slot (an output that drops sometimes).
     pub chance: Option<f32>,
+    /// JEI's large output frame (26x26 around the 16x16 item), as the crafting category draws its result.
+    pub big: bool,
 }
 
 /// A fluid well: the fluid drawn as its texture (never a bucket), filled to `amount` of `capacity`.
@@ -69,6 +71,21 @@ pub(crate) struct Card {
     pub frameless: bool,
     /// Sprites under the slots (`RecipeDef::sprite_under`).
     pub sprites_under: Vec<(String, [f32; 4], [f32; 2])>,
+    /// A bar graph (World Gen's ore heights): its box, the values from the bottom of the world up (bars scaled to
+    /// the largest), and the Y each end stands for.
+    pub graph: Option<Graph>,
+    /// A living entity drawn in a box (Mob Drops' mob, a trade's villager): its type, its saved fields as SNBT
+    /// (a villager's profession), the box.
+    pub entity: Option<(String, String, [f32; 4])>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Graph {
+    pub rect: [f32; 4],
+    pub values: Vec<f32>,
+    pub bottom: i32,
+    pub top: i32,
+    pub peak: i32,
 }
 
 impl Focus {
@@ -101,10 +118,12 @@ impl Card {
             centered: Vec::new(),
             frameless: false,
             sprites_under: Vec::new(),
+            graph: None,
+            entity: None,
         }
     }
     pub(crate) fn slot(&mut self, at: [f32; 2], role: Role, stacks: Vec<(ItemKey, u32)>) -> &mut Slot {
-        self.slots.push(Slot { at, role, stacks, components: Vec::new(), cell: None, chance: None });
+        self.slots.push(Slot { at, role, stacks, components: Vec::new(), cell: None, chance: None, big: false });
         self.slots.last_mut().expect("just pushed")
     }
     pub(crate) fn makes(&self, item: ItemKey) -> bool {

@@ -11,14 +11,30 @@ const POTION_ITEMS: [&str; 4] = ["minecraft:potion", "minecraft:splash_potion", 
 const BOOK: &str = "minecraft:enchanted_book";
 
 /// `items` (every item, in list order) as the panel's entries: the item and its components' JSON (empty for none).
-pub(crate) fn entries(host: &dyn ClientHost, items: &[ItemKey]) -> Vec<(ItemKey, String)> {
-    let potions: Vec<String> = host.potions().into_iter().map(|p| p.id).collect();
+///
+/// A potion item lists the potions the creative tabs show it with (`tabs`), as JEI lists the creative tabs' stacks:
+/// no uncraftable potion or tipped arrow. Before the tabs load, every registered potion.
+pub(crate) fn entries(host: &dyn ClientHost, items: &[ItemKey], tabs: &mod_api::CreativeModeTabs) -> Vec<(ItemKey, String)> {
+    let all: Vec<String> = host.potions().into_iter().map(|p| p.id).collect();
+    let shown = |item: ItemKey| -> Vec<String> {
+        let listed: Vec<String> = tabs
+            .tabs
+            .iter()
+            .flat_map(|t| t.display_items.iter())
+            .filter(|s| s.item() == item)
+            .filter_map(potion_of)
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        let listed: Vec<String> = listed.into_iter().filter(|p| seen.insert(p.clone())).collect();
+        if listed.is_empty() { all.clone() } else { all.iter().filter(|p| seen.contains(*p)).cloned().collect() }
+    };
+    let potions = all.clone();
     let books: Vec<(String, u32)> = host.enchantments().into_iter().map(|e| (e.id, e.max_level)).collect();
     let mut out = Vec::with_capacity(items.len() + potions.len() * POTION_ITEMS.len() + books.iter().map(|(_, n)| *n as usize).sum::<usize>());
     for k in items {
         let id = k.id(host);
         if POTION_ITEMS.contains(&id.as_str()) && !potions.is_empty() {
-            out.extend(potions.iter().map(|p| (*k, potion_json(p))));
+            out.extend(shown(*k).iter().map(|p| (*k, potion_json(p))));
         } else if id == BOOK && !books.is_empty() {
             out.extend(books.iter().flat_map(|(e, most)| (1..=*most).map(move |level| (*k, book_json(e, level)))));
         } else {
@@ -26,6 +42,20 @@ pub(crate) fn entries(host: &dyn ClientHost, items: &[ItemKey]) -> Vec<(ItemKey,
         }
     }
     out
+}
+
+/// The potion a stack holds: its `minecraft:potion_contents` component, written as the potion's id or as
+/// `{potion: <id>, ...}`.
+fn potion_of(stack: &mod_api::ItemStack) -> Option<String> {
+    let contents = stack.components()?.as_nbt().get(&"minecraft:potion_contents".into())?.clone();
+    match contents {
+        Tag::String(id) => Some(id.to_string_lossy()),
+        Tag::Compound(c) => match c.get(&"potion".into())? {
+            Tag::String(id) => Some(id.to_string_lossy()),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// `PotionContents.createItemStack`'s component: `{"minecraft:potion_contents":{"potion":"<id>"}}`.

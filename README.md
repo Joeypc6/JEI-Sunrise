@@ -3,12 +3,12 @@
 Just Enough Items (mezz, MIT; see `LICENSE`, `NOTICE`) as a native mod on Sunrise's mod API: Hooks only, no mixins,
 no `[[inject]]`, no game internals. It is a rewrite on Sunrise's own recipe-viewer APIs, not a copy of the Java mod.
 
-- **Mod id** `jei`, **version** 0.4.0.
+- **Mod id** `jei`, **version** 0.5.0.
 - **Game build:** pinned to the Sunrise Nightly of 2026-11-16, game commit
   `234db8df6210165318b2b604dea50275357bfaeb` (`nightly-2026-11-16-234db8d`), Minecraft 26.3. The launcher compiles the
   mod against that build's prebuilt game; a newer Nightly needs a repinned release.
 - **Install:** in Sunrise's launcher, Mods › Add from GitHub with this repository, or put the release's
-  `jei-0.4.0.smod` in an instance's mods. Native code is not sandboxed: the launcher asks you to trust it.
+  `jei-0.5.0.smod` in an instance's mods. Native code is not sandboxed: the launcher asks you to trust it.
 - **Optional:** `guideme` (the shared guide library), for W over items. JEI works without it.
 
 ## What Sunrise gives and JEI uses
@@ -25,7 +25,7 @@ no `[[inject]]`, no game internals. It is a rewrite on Sunrise's own recipe-view
 | R, U, A keys on Options > Controls | `Registrar::register_key_mapping`, read with `mod_key` |
 | Creative give (Shift-click) | `ItemsClientHost::give` |
 | Fluids drawn as their texture (never a bucket) | `DrawContext::fluid`, `fluid_name` |
-| JEI's own artwork (slot, buttons, arrows) | GUI sprites `horizon/jei/*` the game ships |
+| JEI's own artwork (slot, buttons, arrows) | GUI sprites `sunrise/jei/*` the game ships |
 | Bookmarks file | `config_files()` (`config/jei/bookmarks.txt`) |
 | Other mods' categories | client reload listener over `assets/<ns>/jei/` + the Rust API below |
 
@@ -40,16 +40,34 @@ no `[[inject]]`, no game internals. It is a rewrite on Sunrise's own recipe-view
   cards that cycle their ingredients once a second, the game's tooltips with the mod's name, Backspace back, Esc
   closes, scroll turns pages, a click on the title shows the whole category.
   Vanilla categories: crafting (shaped from the file's pattern, shapeless, transmute), smelting, blasting, smoking,
-  campfire, stonecutting, smithing (transform and trim), fuel.
+  campfire, stonecutting, smithing (transform, and trim with the trimmed armour as the result), fuel.
 - **"+"** on crafting cards: moves one set (Shift: as many as the items allow) into the open crafting grid
   (inventory 2x2, a table, a mod's crafting grid) through the game's viewer transfer (`transfer_recipe_id`); the
   server's dry run greys it and marks missing cells red. A mod's categories get "+" while one of its menus is open
   when the mod says so (`jei::api::register_transfer(menu, category)`, JEI's `addRecipeTransferHandler`); the click
   sends the card's recipe id and the menu's `MenuPart::menu_transfer` on the server moves the items. There is no dry
   run for a mod menu at this Sunrise pin, so that "+" is always lit and a refusal shows when it is clicked.
-- **Potions and enchanted books** are listed one per potion (potion, splash, lingering, tipped arrow) and one per
-  enchantment level (`ClientHost::potions` / `enchantments`, registry order), each in the plain item's place, with
-  its own name and tooltip for the search. Shift-click gives nothing for them (`give` takes a plain item only).
+- **The item list is the creative inventory's** (`ItemsClientHost::creative_tabs`), as JEI's is: items no tab shows
+  and the Operator Utilities tab (command and structure blocks, the debug stick, barrier, light) are left out.
+- **Potions and enchanted books** are listed one per potion the creative tabs show (potion, splash, lingering, tipped
+  arrow; no uncraftable ones) and one per enchantment level, each in the plain item's place, with its own name and
+  tooltip for the search. Shift-click gives nothing for them (`give` takes a plain item only).
+- **Where things come from**, read from the server's own data files (loot tables, worldgen, structures, villager
+  trades), in tabs beside the recipes:
+  - **World Gen:** each ore's height graph per dimension, and where other blocks generate.
+  - **Block Drops:** blocks that need a tool (silk touch, shears), drop something else, or drop by chance or in
+    numbers. A block that simply drops itself has no card.
+  - **Mob Drops:** the mob drawn (it follows the pointer), where it spawns (biomes, light, structures, or how the game
+    places it: shulkers in End Cities, the elder guardian in Ocean Monuments), its XP and drops with chances.
+  - **Chest Loot, Archaeology, Fishing, Piglin Bartering, Shearing:** each table's items with their chance and count
+    per stack.
+  - **Villager Trades:** each trade under the professions that offer it (26.3's shared `smith` trades go to the
+    armorer, toolsmith and weaponsmith), the villager in its profession's clothes, its work station and level name.
+  - **Other Sources, How To Get It:** what no table says (concrete hardens from its powder in water, spawn eggs
+    are creative only).
+- **No empty cards:** a recipe whose items the client doesn't know is left out, and a category nothing fills has no
+  tab. A card line too wide for its card ends in "…" and shows whole under the pointer.
+- **Tooltips:** an inventory slot's tooltip under the open recipe window is not drawn (it would draw under it).
 - **Bookmarks**: A toggles the stack under the pointer; the bar is at the top left (two columns of twelve), left
   click recipes, right click uses, Shift/middle removes, drag to reorder; kept in `config/jei/bookmarks.txt`.
 - **W** (GuideME's key) over a panel item or a recipe-window slot opens its guide page when GuideME is installed.

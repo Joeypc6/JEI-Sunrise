@@ -9,13 +9,15 @@ use std::collections::HashMap;
 
 pub(crate) const CRAFTING: &str = "minecraft:crafting";
 
-/// The built-in categories: (id, title key, icon, recipe types).
+/// The built-in categories: (id, title key, icon, recipe types). Sunrise lists recipes by recipe type, as
+/// vanilla's `RecipeManager` does: every `crafting_*` serializer is `minecraft:crafting`, every `smithing_*`
+/// `minecraft:smithing`; a card tells them apart by its file's `type` ([`serializer`]).
 pub(crate) const CATEGORIES: &[(&str, &str, &str, &[&str])] = &[
     (
         CRAFTING,
         "jei.category.crafting",
         "minecraft:crafting_table",
-        &["minecraft:crafting_shaped", "minecraft:crafting_shapeless", "minecraft:crafting_transmute"],
+        &["minecraft:crafting"],
     ),
     ("minecraft:smelting", "jei.category.smelting", "minecraft:furnace", &["minecraft:smelting"]),
     ("minecraft:blasting", "jei.category.blasting", "minecraft:blast_furnace", &["minecraft:blasting"]),
@@ -31,7 +33,7 @@ pub(crate) const CATEGORIES: &[(&str, &str, &str, &[&str])] = &[
         "minecraft:smithing",
         "jei.category.smithing",
         "minecraft:smithing_table",
-        &["minecraft:smithing_transform", "minecraft:smithing_trim"],
+        &["minecraft:smithing"],
     ),
     ("minecraft:fuel", "jei.category.fuel", "minecraft:furnace", &[]),
 ];
@@ -128,6 +130,12 @@ pub(crate) fn cards(cx: &Ctx<'_>) -> Vec<Card> {
 
 const STEP: f32 = 18.0;
 
+/// The recipe's serializer, its file's `type` (`minecraft:crafting_shaped`); `kind` is its recipe type.
+pub(crate) fn serializer(r: &Recipe) -> &str {
+    r.json["type"].as_str().unwrap_or(&r.kind)
+}
+
+
 fn card(cx: &Ctx<'_>, index: usize, category: &str, r: &Recipe) -> Option<Card> {
     let json = &*r.json;
     match category {
@@ -136,7 +144,7 @@ fn card(cx: &Ctx<'_>, index: usize, category: &str, r: &Recipe) -> Option<Card> 
             c.arrow = Some([61.0, 19.0]);
             c.transfer = true;
             let result = if r.results.is_empty() { cx.result_json(&json["result"]) } else { cx.stack(&r.results[0]) };
-            if r.kind == "minecraft:crafting_shaped" {
+            if serializer(r) == "minecraft:crafting_shaped" {
                 let pattern: Vec<&str> =
                     json["pattern"].as_array()?.iter().filter_map(Value::as_str).collect();
                 let width = pattern.iter().map(|row| row.chars().count()).max().unwrap_or(0);
@@ -156,11 +164,11 @@ fn card(cx: &Ctx<'_>, index: usize, category: &str, r: &Recipe) -> Option<Card> 
                         slot.cell = Some(cell);
                     }
                 }
-            } else if r.kind == "minecraft:crafting_transmute" {
+            } else if serializer(r) == "minecraft:crafting_transmute" {
                 c.shapeless = true;
                 c.slot([1.0, 1.0], Role::Input, cx.ingredient_json(&json["input"])).cell = Some(0);
                 c.slot([1.0 + STEP, 1.0], Role::Input, cx.ingredient_json(&json["material"])).cell = Some(1);
-            } else {
+            } else if serializer(r) == "minecraft:crafting_shapeless" {
                 c.shapeless = true;
                 let list: Vec<Vec<(ItemKey, u32)>> = if r.ingredients.is_empty() {
                     json["ingredients"].as_array()?.iter().map(|v| cx.ingredient_json(v)).collect()
@@ -172,8 +180,21 @@ fn card(cx: &Ctx<'_>, index: usize, category: &str, r: &Recipe) -> Option<Card> 
                     let (x, y) = (i % side, i / side);
                     c.slot([1.0 + x as f32 * STEP, 1.0 + y as f32 * STEP], Role::Input, stacks).cell = Some(i as u32);
                 }
+            } else {
+                // A special recipe (map cloning, banner copying, the decorated pot...): no fixed grid to show.
+                return None;
             }
-            c.slot([95.0, 19.0], Role::Output, result);
+            // JEI draws the whole 3x3 grid: the cells no ingredient fills are empty slots.
+            let filled: Vec<[u32; 2]> =
+                c.slots.iter().map(|s| [((s.at[0] - 1.0) / STEP) as u32, ((s.at[1] - 1.0) / STEP) as u32]).collect();
+            for y in 0..3u32 {
+                for x in 0..3u32 {
+                    if !filled.contains(&[x, y]) {
+                        c.slot([1.0 + x as f32 * STEP, 1.0 + y as f32 * STEP], Role::Input, Vec::new());
+                    }
+                }
+            }
+            c.slot([95.0, 19.0], Role::Output, result).big = true;
             Some(c)
         }
         "minecraft:smelting" | "minecraft:blasting" | "minecraft:smoking" | "minecraft:campfire_cooking" => {
@@ -211,14 +232,71 @@ fn card(cx: &Ctx<'_>, index: usize, category: &str, r: &Recipe) -> Option<Card> 
         "minecraft:smithing" => {
             let mut c = Card::new(index, [108.0, 18.0], &r.id);
             let base = cx.ingredient_json(&json["base"]);
+            let addition = cx.ingredient_json(&json["addition"]);
             c.slot([1.0, 1.0], Role::Input, cx.ingredient_json(&json["template"]));
-            c.slot([19.0, 1.0], Role::Input, base.clone());
-            c.slot([37.0, 1.0], Role::Input, cx.ingredient_json(&json["addition"]));
-            let result = if r.kind == "minecraft:smithing_trim" { base } else { cx.result_json(&json["result"]) };
-            c.slot([91.0, 1.0], Role::Output, result);
+            if serializer(r) == "minecraft:smithing_trim" {
+                // The result is the armour piece wearing the trim: the template's pattern in the material's colour.
+                // Base, material and result cycle together, one pair a second, as JEI's trim category shows them.
+                // 26.3 names the pattern; older data only has the template (`<pattern>_armor_trim_smithing_template`).
+                let pattern = json["pattern"].as_str().map(qualify).or_else(|| {
+                    json["template"].as_str().map(|t| qualify(t.trim_end_matches("_armor_trim_smithing_template")))
+                }).unwrap_or_default();
+                let n = base.len().max(addition.len());
+                if n == 0 || pattern.is_empty() {
+                    return None;
+                }
+                let pairs: Vec<((ItemKey, u32), (ItemKey, u32))> = (0..n).map(|i| (base[i % base.len().max(1)], addition[i % addition.len().max(1)])).collect();
+                c.slot([19.0, 1.0], Role::Input, pairs.iter().map(|p| p.0).collect());
+                c.slot([37.0, 1.0], Role::Input, pairs.iter().map(|p| p.1).collect());
+                let out = c.slot([91.0, 1.0], Role::Output, pairs.iter().map(|p| (p.0.0, 1)).collect());
+                out.components = pairs
+                    .iter()
+                    .map(|(_, (material, _))| trim_json(&pattern, &trim_material(&material.id(cx.host))))
+                    .collect();
+            } else {
+                c.slot([19.0, 1.0], Role::Input, base);
+                c.slot([37.0, 1.0], Role::Input, addition);
+                c.slot([91.0, 1.0], Role::Output, cx.result_json(&json["result"]));
+            }
             c.arrow = Some([61.0, 0.0]);
             Some(c)
         }
         _ => None,
+    }
+}
+
+/// An id with its namespace (`bolt` is `minecraft:bolt`).
+fn qualify(id: &str) -> String {
+    if id.contains(':') { id.to_owned() } else { format!("minecraft:{id}") }
+}
+
+/// The trim material an addition item gives (`provides_trim_material`): vanilla's materials are named after their
+/// item (`minecraft:iron_ingot` is `minecraft:iron`, `minecraft:lapis_lazuli` `minecraft:lapis`).
+fn trim_material(item: &str) -> String {
+    let (ns, path) = item.split_once(':').unwrap_or(("minecraft", item));
+    let name = match path {
+        "lapis_lazuli" => "lapis",
+        p => p.trim_end_matches("_ingot").trim_end_matches("_shard").trim_end_matches("_brick"),
+    };
+    format!("{ns}:{name}")
+}
+
+/// The `minecraft:trim` component of a trimmed armour piece, as the result slot's components.
+fn trim_json(pattern: &str, material: &str) -> String {
+    mod_api::serde_json::json!({ "minecraft:trim": { "pattern": pattern, "material": material } }).to_string()
+}
+
+#[cfg(test)]
+mod trim_tests {
+    use super::*;
+
+    #[test]
+    fn trim_materials_are_named_after_their_items() {
+        assert_eq!(trim_material("minecraft:iron_ingot"), "minecraft:iron");
+        assert_eq!(trim_material("minecraft:lapis_lazuli"), "minecraft:lapis");
+        assert_eq!(trim_material("minecraft:amethyst_shard"), "minecraft:amethyst");
+        assert_eq!(trim_material("minecraft:resin_brick"), "minecraft:resin");
+        assert_eq!(trim_material("minecraft:diamond"), "minecraft:diamond");
+        assert_eq!(trim_json("minecraft:bolt", "minecraft:iron"), r#"{"minecraft:trim":{"material":"minecraft:iron","pattern":"minecraft:bolt"}}"#);
     }
 }
