@@ -1,0 +1,19 @@
+{
+  "key.jei.showRecipe": "Mostrar receta",
+  "key.jei.showUses": "Mostrar usos",
+  "key.jei.bookmark": "Añadir/quitar marcador",
+  "jei.category.crafting": "Fabricación",
+  "jei.category.smelting": "Fundición",
+  "jei.category.blasting": "Alto horno",
+  "jei.category.smoking": "Ahumado",
+  "jei.category.campfire": "Cocina en fogata",
+  "jei.category.stonecutter": "Cortapiedras",
+  "jei.category.smithing": "Herrería",
+  "jei.category.fuel": "Combustible",
+  "jei.category.itemInformation": "Información",
+  "jei.tooltip.transfer": "Mover objetos",
+  "jei.tooltip.error.recipe.transfer.missing": "Faltan objetos",
+  "jei.tooltip.error.recipe.transfer.inventory.full": "El inventario está demasiado lleno",
+  "jei.tooltip.error.recipe.transfer.unsupported": "La receta no cabe en este menú",
+  "jei.modname.jei": "JEI"
+}

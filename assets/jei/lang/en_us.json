@@ -1,0 +1,19 @@
+{
+  "key.jei.showRecipe": "Show Recipe",
+  "key.jei.showUses": "Show Uses",
+  "key.jei.bookmark": "Add/Remove Bookmark",
+  "jei.category.crafting": "Crafting",
+  "jei.category.smelting": "Smelting",
+  "jei.category.blasting": "Blasting",
+  "jei.category.smoking": "Smoking",
+  "jei.category.campfire": "Campfire Cooking",
+  "jei.category.stonecutter": "Stonecutting",
+  "jei.category.smithing": "Smithing",
+  "jei.category.fuel": "Fuel",
+  "jei.category.itemInformation": "Information",
+  "jei.tooltip.transfer": "Move Items",
+  "jei.tooltip.error.recipe.transfer.missing": "Missing Items",
+  "jei.tooltip.error.recipe.transfer.inventory.full": "Inventory is too full",
+  "jei.tooltip.error.recipe.transfer.unsupported": "Recipe does not fit this menu",
+  "jei.modname.jei": "JEI"
+}
