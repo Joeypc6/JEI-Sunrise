@@ -1,5 +1,7 @@
 # JEI for Sunrise
 
+<p align="center"><img src="docs/images/icon.png" alt="JEI" width="128"></p>
+
 Just Enough Items (mezz, MIT; see `LICENSE`, `NOTICE`) as a native mod on Sunrise's mod API: Hooks only, no mixins,
 no `[[inject]]`, no game internals. It is a rewrite on Sunrise's own recipe-viewer APIs, not a copy of the Java mod.
 
@@ -10,6 +12,16 @@ no `[[inject]]`, no game internals. It is a rewrite on Sunrise's own recipe-view
 - **Install:** in Sunrise's launcher, Mods › Add from GitHub with this repository, or put the release's
   `jei-0.5.0.smod` in an instance's mods. Native code is not sandboxed: the launcher asks you to trust it.
 - **Optional:** `guideme` (the shared guide library), for W over items. JEI works without it.
+
+
+## Screenshots
+
+| | |
+|---|---|
+| ![A crafting recipe](docs/images/1-crafting.jpg) | ![World generation: where an ore is found](docs/images/2-worldgen.jpg) |
+| ![Loot tables](docs/images/3-loot.jpg) | ![Block drops](docs/images/4-blockdrops.jpg) |
+| ![Mob drops](docs/images/5-mobs.jpg) | ![Another mod's category: Tinkers' Construct casting](docs/images/6-tinkers-casting.jpg) |
+| ![The item list filtered with @ae2](docs/images/7-search.jpg) | ![An iron ingot's uses across mods](docs/images/8-uses.jpg) |
 
 ## What Sunrise gives and JEI uses
 
