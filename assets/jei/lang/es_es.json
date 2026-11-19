@@ -12,6 +12,7 @@
   "jei.category.fuel": "Combustible",
   "jei.category.itemInformation": "Información",
   "jei.tooltip.transfer": "Mover objetos",
+  "jei.tooltip.cycle": "Rueda para ver las otras",
   "jei.tooltip.error.recipe.transfer.missing": "Faltan objetos",
   "jei.tooltip.error.recipe.transfer.inventory.full": "El inventario está demasiado lleno",
   "jei.tooltip.error.recipe.transfer.unsupported": "La receta no cabe en este menú",

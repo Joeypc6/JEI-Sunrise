@@ -16,7 +16,7 @@
 //! });
 //! ```
 
-use mod_api::Host;
+use mod_api::{ClientHost, Host};
 use std::sync::Mutex;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -217,11 +217,16 @@ pub(crate) struct Registry {
     pub catalysts: Vec<(String, String)>,
     pub recipes: Vec<(String, RecipesFn)>,
     pub info: Vec<(Vec<String>, Vec<String>)>,
-    pub show: Option<(String, bool)>,
+    /// `show`/`show_stack`: (item, components' JSON, uses).
+    pub show: Option<(String, String, bool)>,
     /// (item, component): stacks of the item told apart by that component's value (`register_subtype`).
     pub subtypes: Vec<(String, String)>,
     /// (menu type, category): "+" on the category's cards moves into that menu (`register_transfer`).
     pub transfers: Vec<(String, String)>,
+    /// (owner, the item they follow, the function): extra stacks in the item list (`register_extra_stacks`).
+    pub extras: Vec<(String, String, ExtrasFn)>,
+    /// (mod screen, category, whether it applies, the mod's "+"): `register_screen_transfer`.
+    pub screen_transfers: Vec<(String, String, ScreenOpenFn, ScreenTransferFn)>,
     pub version: u64,
 }
 
@@ -286,6 +291,120 @@ pub fn register_transfer(menu: &str, category: &str) {
             r.transfers.push((menu.to_owned(), category.to_owned()));
         }
     });
+}
+
+/// One more stack for JEI's item list (`register_extra_stacks`): an item with data components, listed beside the
+/// plain item as JEI's `IModIngredientRegistration` lists a mod's own ingredients (AE2's one facade per block).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtraStack {
+    /// The item id (`ae2:facade`).
+    pub item: String,
+    /// Its components in the game's JSON form (`{"minecraft:custom_data":{"item":"minecraft:stone"}}`); empty for
+    /// none. The panel draws the stack with them, and R and U on it find its own recipes when the item has a
+    /// subtype registered for one of them (`register_subtype`).
+    pub components: String,
+    /// More text the search matches as the stack's name (its own tooltip is searched too): "Cable Facade - Stone"
+    /// when the game's tooltip says only "Cable Facade". Empty for none.
+    pub name: String,
+}
+
+impl ExtraStack {
+    pub fn new(item: &str, components: &str) -> Self {
+        Self { item: item.to_owned(), components: components.to_owned(), name: String::new() }
+    }
+    /// Text the search box matches as this stack's name.
+    pub fn name(mut self, name: &str) -> Self {
+        self.name = name.to_owned();
+        self
+    }
+}
+
+/// A function giving a mod's extra stacks, asked each time JEI makes its index (client side; it may translate).
+pub type ExtrasFn = fn(&dyn ClientHost) -> Vec<ExtraStack>;
+
+/// Extra stacks for JEI's item list (0.5.1): `stacks` gives them, in order, each time the list is made; they are
+/// listed right after the entries of item `after` (after its last, when it has several), or at the end when the list
+/// has no such item. A stack already listed (same item and components) is not listed twice. They are searched by
+/// their tooltip and `ExtraStack::name`, and R/U, clicks and bookmarks treat them as any entry. One function per
+/// `owner` (a second call replaces the first).
+pub fn register_extra_stacks(owner: &str, after: &str, stacks: ExtrasFn) {
+    with(|r| {
+        r.extras.retain(|(o, _, _)| o != owner);
+        r.extras.push((owner.to_owned(), after.to_owned(), stacks));
+        r.version += 1;
+    });
+}
+
+/// Whether a mod's screen that `register_screen_transfer` names is the one open now (one mod screen can stand for
+/// several, as AE2's item screen does for its terminals). Client side, asked each frame while it is open.
+pub type ScreenOpenFn = fn(&dyn ClientHost) -> bool;
+/// A mod's "+" on its own screen: the recipe's id, and Shift (as many sets as the items allow). Client side, called
+/// on the next frame with the mutable host; the mod sends its own payload, and its server checks everything.
+pub type ScreenTransferFn = fn(&mut dyn ClientHost, &str, bool);
+
+/// "+" on a mod's own screen (0.5.1), for a screen with no menu (`ClientHost::mod_screen_open`), which
+/// `register_transfer` can't name: while mod screen `screen` is open (`ClientHost::mod_screen() == Some(screen)`)
+/// and `open` says so, the cards of `category` get "+", and a click calls `transfer` with the card's recipe id and
+/// Shift. As for a mod menu there is no dry run: "+" is always offered there, and the mod's server answers the click.
+/// A second call for the same screen and category replaces the first.
+pub fn register_screen_transfer(screen: &str, category: &str, open: ScreenOpenFn, transfer: ScreenTransferFn) {
+    with(|r| {
+        r.screen_transfers.retain(|(s, c, _, _)| !(s == screen && c == category));
+        r.screen_transfers.push((screen.to_owned(), category.to_owned(), open, transfer));
+    });
+}
+
+/// The screen transfers that apply on mod screen `screen` now: (category, the mod's "+").
+pub(crate) fn screen_transfers(host: &dyn ClientHost, screen: &str) -> Vec<(String, ScreenTransferFn)> {
+    let list: Vec<(String, ScreenOpenFn, ScreenTransferFn)> = with(|r| {
+        r.screen_transfers.iter().filter(|(s, _, _, _)| s == screen).map(|(_, c, o, t)| (c.clone(), *o, *t)).collect()
+    });
+    // Asked outside the registry's lock: the mod's function may call back into this API.
+    list.into_iter().filter(|(_, open, _)| open(host)).map(|(c, _, t)| (c, t)).collect()
+}
+
+/// The "+" for `category` among the screen transfers in force (`screen_transfers`), if any.
+pub(crate) fn screen_transfer_for<F: Copy>(active: &[(String, F)], category: &str) -> Option<F> {
+    active.iter().find(|(c, _)| c == category).map(|(_, f)| *f)
+}
+
+/// The extra stacks placed into the list (pure): each group goes right after the last entry of its anchor item, in
+/// registration order, or at the end when the anchor isn't listed; a stack already in the list is left out.
+pub(crate) fn place_extras<K: Copy + PartialEq>(mut items: Vec<(K, String)>, groups: Vec<(Option<K>, Vec<(K, String)>)>) -> Vec<(K, String)> {
+    for (anchor, stacks) in groups {
+        let mut fresh: Vec<(K, String)> = Vec::new();
+        for s in stacks {
+            if !items.contains(&s) && !fresh.contains(&s) {
+                fresh.push(s);
+            }
+        }
+        let at = anchor.and_then(|a| items.iter().rposition(|(k, _)| *k == a)).map_or(items.len(), |i| i + 1);
+        items.splice(at..at, fresh);
+    }
+    items
+}
+
+/// The extra stacks of every mod, made now: (anchor item id, stacks), in registration order.
+pub(crate) fn extras(host: &dyn ClientHost) -> Vec<(String, Vec<ExtraStack>)> {
+    let fns: Vec<(String, ExtrasFn)> = with(|r| r.extras.iter().map(|(_, a, f)| (a.clone(), *f)).collect());
+    fns.into_iter().map(|(a, f)| (a, f(host))).collect()
+}
+
+/// JEI's key for an item's recipes or uses, for a mod screen that draws its own stacks (0.5.1): `Some(false)` when
+/// `key` (`key.keyboard.r`) is bound to Show Recipes, `Some(true)` for Show Uses, else None. The mod then calls
+/// [`show_stack`] with the stack under the pointer. Client side.
+pub fn lookup_key(host: &dyn ClientHost, key: &str) -> Option<bool> {
+    match crate::key_act(host, key)? {
+        crate::KeyAct::Recipes => Some(false),
+        crate::KeyAct::Uses => Some(true),
+        crate::KeyAct::Bookmark => None,
+    }
+}
+
+/// As [`show`], for a stack with components (their JSON, empty for none): a subtype opens on its own recipes (a
+/// facade of one block). Opens over a container screen or a mod's own screen (0.5.1).
+pub fn show_stack(item: &str, components: &str, uses: bool) {
+    with(|r| r.show = Some((item.to_owned(), components.to_owned(), uses)));
 }
 
 /// Whether a mod moves `category`'s recipes into menu type `menu` (`register_transfer`).
@@ -358,11 +477,140 @@ fn syntax_value(components: &str, component: &str) -> Option<String> {
             let v = value.trim();
             return Some(match v.strip_prefix('"').and_then(|x| x.strip_suffix('"')) {
                 Some(text) => mod_api::serde_json::Value::String(text.replace("\\\"", "\"")).to_string(),
-                None => v.to_owned(),
+                // A compound or list (`{item:"minecraft:stone"}`) as the JSON a recipe's slot writes, so the two
+                // compare (a facade in an inventory slot finds its own recipe).
+                None => snbt_json(v).unwrap_or_else(|| v.to_owned()),
             });
         }
     }
     None
+}
+
+/// A compound or list in vanilla's item syntax as compact JSON: bare keys quoted, numbers' type letters dropped
+/// (`{item:"minecraft:stone",n:1b}` is `{"item":"minecraft:stone","n":1}`). None when it isn't one.
+pub(crate) fn snbt_json(text: &str) -> Option<String> {
+    let t = text.trim();
+    if !(t.starts_with('{') || t.starts_with('[')) {
+        return None;
+    }
+    let chars: Vec<char> = t.chars().collect();
+    let mut out = String::with_capacity(t.len() + 16);
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '"' || c == '\'' {
+            // A string: copied as a JSON string.
+            let quote = c;
+            let mut s = String::new();
+            i += 1;
+            while i < chars.len() && chars[i] != quote {
+                if chars[i] == '\\' && i + 1 < chars.len() {
+                    i += 1;
+                }
+                s.push(chars[i]);
+                i += 1;
+            }
+            out.push_str(&mod_api::serde_json::Value::String(s).to_string());
+            i += 1;
+        } else if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' || c == '+' {
+            // A bare word: a key (before `:`), or a number with an optional type letter, or true/false.
+            let start = i;
+            while i < chars.len() && (chars[i].is_ascii_alphanumeric() || "_-.+".contains(chars[i])) {
+                i += 1;
+            }
+            let word: String = chars[start..i].iter().collect();
+            let mut j = i;
+            while j < chars.len() && chars[j].is_whitespace() {
+                j += 1;
+            }
+            if chars.get(j) == Some(&':') {
+                out.push_str(&mod_api::serde_json::Value::String(word).to_string());
+            } else if word == "true" || word == "false" {
+                out.push_str(&word);
+            } else {
+                let num = word.trim_end_matches(['b', 'B', 's', 'S', 'l', 'L', 'f', 'F', 'd', 'D']);
+                num.parse::<f64>().ok()?;
+                out.push_str(num);
+            }
+        } else if c.is_whitespace() {
+            i += 1;
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+    let v: mod_api::serde_json::Value = mod_api::serde_json::from_str(&out).ok()?;
+    Some(v.to_string())
+}
+
+/// Components' JSON (`{"minecraft:custom_data":{"item":"minecraft:stone"}}`) in the item syntax the game's panel
+/// reads (`[minecraft:custom_data={item:"minecraft:stone"}]`, as `/give` writes them); text already in that syntax,
+/// or not JSON, is kept. The panel (`panel_items`) reads only this syntax: JSON drew every subtype as its plain item.
+pub(crate) fn panel_components(json: &str) -> String {
+    use mod_api::serde_json::Value;
+    fn snbt(v: &Value, out: &mut String) {
+        match v {
+            Value::Null => out.push_str("\"\""),
+            Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+            Value::Number(n) => out.push_str(&n.to_string()),
+            Value::String(s) => quoted(s, out),
+            Value::Array(a) => {
+                out.push('[');
+                for (i, x) in a.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    snbt(x, out);
+                }
+                out.push(']');
+            }
+            Value::Object(o) => {
+                out.push('{');
+                for (i, (k, x)) in o.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    key(k, out);
+                    out.push(':');
+                    snbt(x, out);
+                }
+                out.push('}');
+            }
+        }
+    }
+    fn quoted(s: &str, out: &mut String) {
+        out.push('"');
+        for c in s.chars() {
+            if c == '"' || c == '\\' {
+                out.push('\\');
+            }
+            out.push(c);
+        }
+        out.push('"');
+    }
+    fn key(k: &str, out: &mut String) {
+        if !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || "_-.+".contains(c)) {
+            out.push_str(k);
+        } else {
+            quoted(k, out);
+        }
+    }
+    let t = json.trim();
+    if t.is_empty() || t.starts_with('[') {
+        return t.to_owned();
+    }
+    let Ok(Value::Object(o)) = mod_api::serde_json::from_str::<Value>(t) else { return t.to_owned() };
+    let mut out = String::from("[");
+    for (i, (k, v)) in o.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(k);
+        out.push('=');
+        snbt(v, &mut out);
+    }
+    out.push(']');
+    out
 }
 
 /// A stack of `item` with the components in `json` (the game's JSON form, as `Stack::components` gives it).
@@ -405,10 +653,82 @@ pub fn add_info(items: &[&str], lines: &[&str]) {
 
 /// Opens the recipe window on an item's recipes (or its uses) on the next frame, as R (U) does.
 pub fn show(item: &str, uses: bool) {
-    with(|r| r.show = Some((item.to_owned(), uses)));
+    show_stack(item, "", uses);
 }
 
 /// An argument of [`RecipeDef::text_tr`] (or a JSON text's `tr_args`) that is itself translated on the client.
 pub fn tr_arg(key: &str) -> String {
     format!("\u{1}{key}")
+}
+
+/// The text in JEI's search box now (what the player last typed there; empty before the first search). AE2's
+/// terminal reads it for its "Use JEI" and "Sync with JEI search" settings (`IJeiRuntime.getIngredientFilter().
+/// getFilterText()`). Client-side.
+pub fn search_text() -> String {
+    crate::state::with(|j| j.search.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn e(k: u32, c: &str) -> (u32, String) {
+        (k, c.to_owned())
+    }
+
+    /// Extra stacks go right after their anchor's last entry, in order; no anchor (or none listed) puts them last;
+    /// a stack already listed isn't listed again.
+    #[test]
+    fn extras_follow_their_anchor() {
+        let items = vec![e(1, ""), e(2, ""), e(3, "{a}"), e(3, "{b}"), e(4, "")];
+        let placed = place_extras(items.clone(), vec![(Some(2), vec![e(9, "{x}"), e(9, "{y}")])]);
+        assert_eq!(placed, vec![e(1, ""), e(2, ""), e(9, "{x}"), e(9, "{y}"), e(3, "{a}"), e(3, "{b}"), e(4, "")]);
+        // After the last of an item's entries (potions, books).
+        let placed = place_extras(items.clone(), vec![(Some(3), vec![e(9, "{x}")])]);
+        assert_eq!(placed[4], e(9, "{x}"));
+        assert_eq!(placed[5], e(4, ""));
+        // An anchor not in the list, or none: at the end.
+        assert_eq!(place_extras(items.clone(), vec![(Some(7), vec![e(9, "{x}")])]).last(), Some(&e(9, "{x}")));
+        assert_eq!(place_extras(items.clone(), vec![(None, vec![e(9, "{x}")])]).last(), Some(&e(9, "{x}")));
+        // Duplicates of the list and of each other are dropped; two groups keep registration order.
+        let placed = place_extras(items, vec![(Some(1), vec![e(3, "{a}"), e(8, ""), e(8, "")]), (Some(1), vec![e(7, "")])]);
+        assert_eq!(placed, vec![e(1, ""), e(7, ""), e(8, ""), e(2, ""), e(3, "{a}"), e(3, "{b}"), e(4, "")]);
+    }
+
+    #[test]
+    fn screen_transfer_by_category() {
+        let active = vec![("minecraft:crafting".to_owned(), 1u8), ("ae2:x".to_owned(), 2u8)];
+        assert_eq!(screen_transfer_for(&active, "minecraft:crafting"), Some(1));
+        assert_eq!(screen_transfer_for(&active, "minecraft:smelting"), None);
+        assert_eq!(screen_transfer_for::<u8>(&[], "minecraft:crafting"), None);
+    }
+
+    #[test]
+    fn extra_stack_builder() {
+        let s = ExtraStack::new("ae2:facade", "{}").name("Cable Facade - Stone");
+        assert_eq!((s.item.as_str(), s.components.as_str(), s.name.as_str()), ("ae2:facade", "{}", "Cable Facade - Stone"));
+    }
+
+    /// A facade in an inventory slot (vanilla's item syntax) and on a recipe card (JSON) give the same value.
+    #[test]
+    fn slot_syntax_compounds_compare_with_json() {
+        let card = r#"{"minecraft:custom_data":{"item":"minecraft:stone"},"minecraft:item_model":"ae2:hz_facade_stone"}"#;
+        let slot = r#"[minecraft:custom_data={item:"minecraft:stone"},minecraft:item_model="ae2:hz_facade_stone"]"#;
+        let a = component_value(card, "minecraft:custom_data");
+        assert_eq!(a.as_deref(), Some(r#"{"item":"minecraft:stone"}"#));
+        assert_eq!(component_value(slot, "minecraft:custom_data"), a);
+        assert_eq!(snbt_json(r"{n:1b,s:'a\'b',l:[1,2L]}").as_deref(), Some(r#"{"l":[1,2],"n":1,"s":"a'b"}"#));
+        assert_eq!(snbt_json("plain"), None);
+        // The panel's syntax, and back: the same value JEI compares.
+        let panel = panel_components(card);
+        assert_eq!(panel, r#"[minecraft:custom_data={item:"minecraft:stone"},minecraft:item_model="ae2:hz_facade_stone"]"#);
+        assert_eq!(component_value(&panel, "minecraft:custom_data"), a);
+        assert_eq!(
+            panel_components(r#"{"minecraft:stored_enchantments":{"minecraft:sharpness":5}}"#),
+            r#"[minecraft:stored_enchantments={"minecraft:sharpness":5}]"#
+        );
+        assert_eq!(panel_components(""), "");
+        assert_eq!(panel_components("[a=1]"), "[a=1]");
+        assert_eq!(panel_components(r#"{"s":"a\"b"}"#), r#"[s="a\"b"]"#);
+    }
 }

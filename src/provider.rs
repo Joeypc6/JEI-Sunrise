@@ -118,6 +118,21 @@ pub(crate) fn add(cx: &Ctx<'_>, categories: &mut Vec<Category>, cards: &mut Vec<
     }
 }
 
+/// The recipe types the providers' categories read (`recipe_type`), for the index to notice when their recipes
+/// arrive. // jeiA
+pub(crate) fn recipe_types() -> Vec<String> {
+    let files = FILES.lock().unwrap_or_else(|e| e.into_inner());
+    let mut out: Vec<String> = Vec::new();
+    for (_, v) in files.iter().filter(|(id, _)| id.contains(":categories/")) {
+        for k in strings(&v["recipe_type"]) {
+            if !out.contains(&k) {
+                out.push(k);
+            }
+        }
+    }
+    out
+}
+
 fn strings(v: &Value) -> Vec<String> {
     match v {
         Value::String(s) => vec![s.clone()],

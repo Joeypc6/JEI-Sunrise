@@ -21,11 +21,36 @@ pub(crate) fn ensure_names(jei: &mut Jei, host: &dyn ClientHost) {
                 TooltipElement::Text(t, _) => host.text_string(&t).ok(),
                 _ => None,
             });
-            let name = text.next().unwrap_or_else(|| k.id(host)).to_lowercase();
+            let mut name = text.next().unwrap_or_else(|| k.id(host)).to_lowercase();
+            // A mod's name for its extra stack (`api::ExtraStack::name`): "cable facade - stone".
+            if let Some(extra) = jei.extra_names.get(&(*k, components.clone())) {
+                name = joined_name(&name, extra);
+            }
             let tip = text.collect::<Vec<_>>().join(" ").to_lowercase();
             (name, tip)
         })
         .collect();
+}
+
+/// The name the search matches: the tooltip's and a mod's own, apart (no word runs across the two).
+pub(crate) fn joined_name(tooltip: &str, extra: &str) -> String {
+    if extra.is_empty() || tooltip == extra { tooltip.to_owned() } else { format!("{extra}\n{tooltip}") }
+}
+
+/// Whether one search term (no `-`) hits an entry: `@` its mod, `$` its tooltip, `&` its id, else its name. A `#`
+/// term is the tag's (`tagged`).
+pub(crate) fn term_hits(term: &str, id: &str, name: &str, tip: &str, tagged: bool) -> bool {
+    if let Some(m) = term.strip_prefix('@') {
+        id.split(':').next().unwrap_or("").contains(m)
+    } else if term.starts_with('#') {
+        tagged
+    } else if let Some(s) = term.strip_prefix('$') {
+        tip.contains(s)
+    } else if let Some(s) = term.strip_prefix('&') {
+        id.contains(s)
+    } else {
+        name.contains(term)
+    }
 }
 
 fn terms(query: &str) -> Vec<String> {
@@ -99,21 +124,32 @@ pub(crate) fn filter(jei: &Jei, host: &dyn Host, query: &str) -> Vec<(ItemKey, S
                     if matches!(t, "" | "@" | "#" | "$" | "&" | "%") {
                         return true;
                     }
-                    let hit = if let Some(m) = t.strip_prefix('@') {
-                        id.split(':').next().unwrap_or("").contains(m)
-                    } else if t.starts_with('#') {
-                        tag.contains(k)
-                    } else if let Some(s) = t.strip_prefix('$') {
-                        tip.contains(s)
-                    } else if let Some(s) = t.strip_prefix('&') {
-                        id.contains(s)
-                    } else {
-                        name.contains(t)
-                    };
+                    let hit = term_hits(t, &id, name, tip, t.starts_with('#') && tag.contains(k));
                     hit != neg
                 })
             })
         })
         .map(|(_, e)| e.clone())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An extra stack is found by the name its mod gives (a facade by its block), as by its tooltip's.
+    #[test]
+    fn extra_names_are_searched() {
+        let name = joined_name("cable facade", "cable facade - acacia log");
+        assert!(term_hits("acacia", "ae2:facade", &name, "", false));
+        assert!(term_hits("facade", "ae2:facade", &name, "", false));
+        assert!(!term_hits("stone", "ae2:facade", &name, "", false));
+        // No word across the two names.
+        assert!(!term_hits("logcable", "ae2:facade", &name, "", false));
+        assert_eq!(joined_name("stone", ""), "stone");
+        assert!(term_hits("@ae2", "ae2:facade", &name, "", false));
+        assert!(term_hits("&facade", "ae2:facade", &name, "", false));
+        assert!(term_hits("$log", "ae2:facade", &name, "oak log", false));
+        assert!(term_hits("#planks", "ae2:facade", &name, "", true));
+    }
 }

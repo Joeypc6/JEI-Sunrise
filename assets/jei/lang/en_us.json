@@ -12,6 +12,7 @@
   "jei.category.fuel": "Fuel",
   "jei.category.itemInformation": "Information",
   "jei.tooltip.transfer": "Move Items",
+  "jei.tooltip.cycle": "Scroll for the others",
   "jei.tooltip.error.recipe.transfer.missing": "Missing Items",
   "jei.tooltip.error.recipe.transfer.inventory.full": "Inventory is too full",
   "jei.tooltip.error.recipe.transfer.unsupported": "Recipe does not fit this menu",

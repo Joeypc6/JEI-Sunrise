@@ -3,7 +3,7 @@
 //! the open crafting grid. Drawn in `screen_render_post`, which draws over any screen; its input comes in the
 //! `screen_*_pre` hooks, which it cancels so nothing reaches the screen under it.
 
-use crate::state::{Action, Jei, Target, Window, inside};
+use crate::state::{Action, Hold, Jei, SlotAt, Target, Window, inside};
 use crate::view::{Card, Focus, Role};
 use crate::{bookmarks, displays, tr};
 use mod_api::*;
@@ -167,9 +167,39 @@ fn arrow_icon(draw: &mut dyn DrawContext, at: [f32; 2], next: bool) {
     }
 }
 
-/// The stack a slot shows now: it cycles once a second, as JEI's do.
-pub(crate) fn shown(stacks: &[(ItemKey, u32)], millis: u64) -> Option<(ItemKey, u32)> {
-    (!stacks.is_empty()).then(|| stacks[(millis / 1000) as usize % stacks.len()])
+// jeiA: a slot's stack is chosen by `shown_index` (its cycle, once a second as JEI's, or its recipe's pick).
+
+/// A slot's stack `i` with its components' JSON (empty for none). // jeiA
+fn stack_at<'a>(stacks: &[(ItemKey, u32)], components: &'a [String], i: usize) -> (ItemKey, &'a str) {
+    (stacks[i].0, components.get(i).map(String::as_str).unwrap_or(""))
+}
+
+/// The index of the stack a slot shows: the latest pick of its recipe it holds (so slots holding the same tag show
+/// the same choice, as JEI's focus links them), else its cycle at `millis`. // jeiA
+pub(crate) fn shown_index(stacks: &[(ItemKey, u32)], components: &[String], millis: u64, picks: &[(ItemKey, String)]) -> Option<usize> {
+    if stacks.is_empty() {
+        return None;
+    }
+    for (k, c) in picks.iter().rev() {
+        if let Some(i) = (0..stacks.len()).find(|i| stack_at(stacks, components, *i) == (*k, c.as_str())) {
+            return Some(i);
+        }
+    }
+    Some((millis / 1000) as usize % stacks.len())
+}
+
+/// Steps a slot `by` places from the stack it shows (`shown`), and picks that stack for its recipe: the picks this
+/// slot could show give way, so the new one is shown here and in every slot that can hold it. // jeiA
+pub(crate) fn step(picks: &mut Vec<(ItemKey, String)>, stacks: &[(ItemKey, u32)], components: &[String], shown: usize, by: i32) {
+    let n = stacks.len() as i32;
+    if n < 2 {
+        return;
+    }
+    let next = (shown as i32 + by).rem_euclid(n) as usize;
+    let (item, json) = stack_at(stacks, components, next);
+    let pick = (item, json.to_owned());
+    picks.retain(|(k, c)| !(0..stacks.len()).any(|i| stack_at(stacks, components, i) == (*k, c.as_str())));
+    picks.push(pick);
 }
 
 fn text_of(host: &dyn ClientHost, raw: &str) -> String {
@@ -340,14 +370,24 @@ pub(crate) fn draw(jei: &mut Jei, host: &dyn ClientHost, draw: &mut dyn DrawCont
     let end = pages.get(page + 1).copied().unwrap_or(cards.len());
     let mut y = top;
     let mut checks = Vec::new();
+    jei.slots_at.clear();
+    // jeiA: each recipe's box with its "+" beside it: the pointer leaving the held recipe's lets its slots cycle again.
+    let mut areas: Vec<(usize, [f32; 4])> = Vec::new();
     for (k, ci) in cards[start..end].iter().enumerate() {
         let card = jei.cards[*ci].clone();
         let h = heights[start + k];
         let x = x0 + ((width - card.size[0]) / 2.0).floor();
         // Each recipe in a box of its own, as JEI draws them.
         card_box(draw, [x - PAD, y - PAD, card.size[0] + 2.0 * PAD, h + 2.0 * PAD]);
-        draw_card(jei, host, draw, &card, [x, y], h, mouse, &mut checks);
+        areas.push((*ci, [x - PAD, y - PAD, card.size[0] + 2.0 * PAD + 16.0, h + 2.0 * PAD]));
+        draw_card(jei, host, draw, &card, *ci, [x, y], h, mouse, &mut checks);
         y += h + GAP;
+    }
+    if let Some(win) = jei.window.as_mut()
+        && let Some(hold) = &win.hold
+        && !areas.iter().any(|(ci, r)| *ci == hold.card && inside(*r, mouse))
+    {
+        win.hold = None;
     }
     if !checks.is_empty() {
         jei.actions.push(Action::Check(checks));
@@ -357,8 +397,13 @@ pub(crate) fn draw(jei: &mut Jei, host: &dyn ClientHost, draw: &mut dyn DrawCont
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_card(jei: &mut Jei, host: &dyn ClientHost, draw: &mut dyn DrawContext, card: &Card, at: [f32; 2], h: f32, mouse: [f32; 2], checks: &mut Vec<(i32, String)>) {
+fn draw_card(jei: &mut Jei, host: &dyn ClientHost, draw: &mut dyn DrawContext, card: &Card, ci: usize, at: [f32; 2], h: f32, mouse: [f32; 2], checks: &mut Vec<(i32, String)>) {
     let [x, y] = at;
+    // jeiA: a held recipe's slots stay at the time it was held and show its picks.
+    let (time, picks) = match jei.window.as_ref().and_then(|w| w.hold.as_ref()).filter(|h| h.card == ci) {
+        Some(h) => (h.since, h.picks.clone()),
+        None => (jei.millis, Vec::new()),
+    };
     if let Some((sprite, uv, tex)) = &card.background {
         draw.sprite(sprite, *uv, [x, y, uv[2], uv[3]], None);
         let _ = tex;
@@ -369,7 +414,11 @@ fn draw_card(jei: &mut Jei, host: &dyn ClientHost, draw: &mut dyn DrawContext, c
     // "+": the server's dry run says what it would do; missing inputs are marked red.
     let mut missing: Vec<u32> = Vec::new();
     let mut plus = None;
-    if card.transfer
+    // A mod's own screen offers "+" for this category (`api::register_screen_transfer`): the mod answers the click.
+    let screen_plus = crate::api::screen_transfer_for(&jei.screen_plus, &jei.categories[card.category].id);
+    if screen_plus.is_some() {
+        plus = Some((None, RecipeTransferResult::Moves));
+    } else if card.transfer
         && let Some(display) = displays::of(&card.recipe)
     {
         checks.push((display, card.recipe.clone()));
@@ -389,7 +438,7 @@ fn draw_card(jei: &mut Jei, host: &dyn ClientHost, draw: &mut dyn DrawContext, c
     if plus.is_none() || !inside(plus_rect, mouse) {
         missing.clear();
     }
-    for s in &card.slots {
+    for (si, s) in card.slots.iter().enumerate() {
         let sx = [x + s.at[0] - 1.0, y + s.at[1] - 1.0];
         if s.big {
             big_frame(draw, [sx[0] - 4.0, sx[1] - 4.0]);
@@ -399,15 +448,21 @@ fn draw_card(jei: &mut Jei, host: &dyn ClientHost, draw: &mut dyn DrawContext, c
         if s.cell.is_some_and(|c| missing.contains(&c)) && !s.stacks.is_empty() {
             draw.fill([sx[0] + 1.0, sx[1] + 1.0, 16.0, 16.0], 0x80FF_0000);
         }
-        let index = if s.stacks.is_empty() { 0 } else { (jei.millis / 1000) as usize % s.stacks.len() };
-        let json = s.components.get(index).filter(|c| !c.is_empty()).cloned();
-        if let (Some((item, count)), Some(json)) = (shown(&s.stacks, jei.millis), json) {
+        // jeiA: the stack shown is the recipe's pick when it holds one, else the cycle's; the tooltip, R/U and "+"
+        // all take that one.
+        let index = shown_index(&s.stacks, &s.components, time, &picks);
+        let json = index.and_then(|i| s.components.get(i)).filter(|c| !c.is_empty()).cloned();
+        let now = index.map(|i| s.stacks[i]);
+        if let Some(i) = index {
+            jei.slots_at.push(SlotAt { rect: [sx[0], sx[1], SLOT, SLOT], card: ci, slot: si, index: i, count: s.stacks.len() });
+        }
+        if let (Some((item, count)), Some(json)) = (now, json) {
             // A stack with components (a subtype): drawn as itself, and its focus is its subtype.
             if let Some(stack) = crate::api::stack_with(item, count, &json) {
                 draw.gui_draw_item_with(&stack, [sx[0] + 1.0, sx[1] + 1.0], None);
             }
             jei.targets.push(([sx[0], sx[1], SLOT, SLOT], Target::Sub(item, json)));
-        } else if let Some((item, count)) = shown(&s.stacks, jei.millis) {
+        } else if let Some((item, count)) = now {
             match ItemStack::new(item, count.max(1)) {
                 Some(stack) if count > 1 => draw.gui_draw_item_with(&stack, [sx[0] + 1.0, sx[1] + 1.0], None),
                 _ => {
@@ -527,7 +582,7 @@ fn draw_card(jei: &mut Jei, host: &dyn ClientHost, draw: &mut dyn DrawContext, c
         button(draw, r, inside(r, mouse) && usable, usable);
         let tw = draw.text_width("+");
         draw.text("+", [r[0] + ((r[2] - tw) / 2.0).floor() + 0.5, r[1] + 3.0], if usable { 0xFFFF_FFFF } else { 0xFFA0_A0A0 }, true);
-        jei.targets.push((r, Target::Plus(display, card.recipe.clone())));
+        jei.targets.push((r, Target::Plus(display, card.recipe.clone(), screen_plus)));
     }
 }
 
@@ -551,6 +606,11 @@ fn tooltip(jei: &Jei, host: &dyn ClientHost, draw: &mut dyn DrawContext, mouse: 
             let id = item.id(host);
             let ns = id.split(':').next().unwrap_or("minecraft");
             lines.push(Text::literal(format!("§9§o{}", mod_name(host, ns))));
+            // jeiA: a slot with alternatives says how to step through them, and which one this is.
+            if let Some(sa) = jei.slots_at.iter().rev().find(|s| inside(s.rect, mouse)).filter(|s| s.count > 1) {
+                let hint = tr(host, "jei.tooltip.cycle", "Scroll for the others");
+                lines.push(Text::literal(format!("§8{hint} ({}/{})", sa.index + 1, sa.count)));
+            }
         }
         Target::Fluid(fluid, amount) => {
             lines.push(Text::literal(host.fluid_name(&fluid)));
@@ -563,7 +623,7 @@ fn tooltip(jei: &Jei, host: &dyn ClientHost, draw: &mut dyn DrawContext, mouse: 
                 lines.push(Text::literal(host.translate(&l).unwrap_or(l)));
             }
         }
-        Target::Plus(display, _) => {
+        Target::Plus(display, _, _) => {
             let key = match display.map_or(Some(RecipeTransferResult::Moves), |d| jei.checks.get(&d).map(|c| c.result)) {
                 Some(RecipeTransferResult::Moves) => "jei.tooltip.transfer",
                 Some(RecipeTransferResult::Missing) => "jei.tooltip.error.recipe.transfer.missing",
@@ -656,8 +716,11 @@ pub(crate) fn click(jei: &mut Jei, at: [f32; 2], button: i32, shift: bool) -> bo
             jei.open(Focus::Fluid(fluid), button == 1);
             return true;
         }
-        Some(Target::Plus(display, recipe)) => {
-            if display.is_none_or(|d| jei.checks.get(&d).is_some_and(|c| c.result == RecipeTransferResult::Moves)) {
+        Some(Target::Plus(display, recipe, screen_plus)) => {
+            if let Some(transfer) = screen_plus {
+                jei.actions.push(Action::ScreenTransfer(transfer, recipe, shift));
+                jei.close();
+            } else if display.is_none_or(|d| jei.checks.get(&d).is_some_and(|c| c.result == RecipeTransferResult::Moves)) {
                 jei.actions.push(Action::Transfer(recipe, shift));
                 jei.close();
             }
@@ -681,7 +744,23 @@ pub(crate) fn click(jei: &mut Jei, at: [f32; 2], button: i32, shift: bool) -> bo
     true
 }
 
-pub(crate) fn scroll(jei: &mut Jei, dy: f64) {
+pub(crate) fn scroll(jei: &mut Jei, dy: f64, at: [f32; 2]) {
+    // jeiA: the wheel over a slot with alternatives steps through them (up: the one before), holding its recipe
+    // still until the pointer leaves it; elsewhere it turns the page.
+    if let Some(sa) = jei.slots_at.iter().rev().find(|s| inside(s.rect, at)).filter(|s| s.count > 1).copied() {
+        let by = if dy > 0.0 { -1 } else if dy < 0.0 { 1 } else { return };
+        let millis = jei.millis;
+        let Some(slot) = jei.cards.get(sa.card).and_then(|c| c.slots.get(sa.slot)).cloned() else { return };
+        let recipe = jei.cards[sa.card].recipe.clone();
+        if let Some(w) = jei.window.as_mut() {
+            let hold = match &mut w.hold {
+                Some(h) if h.card == sa.card => h,
+                other => other.insert(Hold { card: sa.card, recipe, since: millis, picks: Vec::new() }),
+            };
+            step(&mut hold.picks, &slot.stacks, &slot.components, sa.index, by);
+        }
+        return;
+    }
     if let Some(w) = jei.window.as_mut() {
         if dy > 0.0 {
             w.page = w.page.saturating_sub(1);
@@ -721,5 +800,70 @@ pub(crate) fn role_name(r: Role) -> &'static str {
         Role::Input => "input",
         Role::Output => "output",
         Role::Other => "other",
+    }
+}
+
+// jeiA: stepping through a slot's alternatives and the links between a recipe's slots.
+#[cfg(test)]
+mod cycle_tests {
+    use super::*;
+
+    fn k(n: u32) -> ItemKey {
+        mod_api::__private::parts_installation::item_key(n)
+    }
+
+    fn list(ns: &[u32]) -> Vec<(ItemKey, u32)> {
+        ns.iter().map(|n| (k(*n), 1)).collect()
+    }
+
+    /// Unheld, a slot cycles once a second; a pick it holds wins over the cycle.
+    #[test]
+    fn a_pick_wins_over_the_cycle() {
+        let rubbers = list(&[1, 2, 3]);
+        assert_eq!(shown_index(&rubbers, &[], 0, &[]), Some(0));
+        assert_eq!(shown_index(&rubbers, &[], 2_500, &[]), Some(2));
+        assert_eq!(shown_index(&[], &[], 0, &[]), None);
+        assert_eq!(shown_index(&rubbers, &[], 0, &[(k(3), String::new())]), Some(2));
+        // A pick the slot can't hold leaves it cycling.
+        assert_eq!(shown_index(&rubbers, &[], 1_000, &[(k(9), String::new())]), Some(1));
+    }
+
+    /// The wheel steps both ways round the list, and slots holding the same tag show the same choice.
+    #[test]
+    fn stepping_links_the_recipes_slots() {
+        let rubbers = list(&[1, 2, 3]);
+        let sticks = list(&[7]);
+        let mut picks = Vec::new();
+        step(&mut picks, &rubbers, &[], 0, 1);
+        assert_eq!(picks, vec![(k(2), String::new())]);
+        // Every rubber slot of the recipe shows mod B's rubber now; the stick slot is left alone.
+        assert_eq!(shown_index(&rubbers, &[], 0, &picks), Some(1));
+        assert_eq!(shown_index(&rubbers, &[], 5_000, &picks), Some(1));
+        assert_eq!(shown_index(&sticks, &[], 0, &picks), Some(0));
+        // Back past the first goes round to the last; the old rubber pick gives way.
+        step(&mut picks, &rubbers, &[], 0, -1);
+        assert_eq!(picks, vec![(k(3), String::new())]);
+        // A slot with one stack has nothing to step.
+        step(&mut picks, &sticks, &[], 0, 1);
+        assert_eq!(picks, vec![(k(3), String::new())]);
+        // Another list's pick stays beside it.
+        let ingots = list(&[4, 5]);
+        step(&mut picks, &ingots, &[], 0, 1);
+        assert_eq!(picks, vec![(k(3), String::new()), (k(5), String::new())]);
+        assert_eq!(shown_index(&rubbers, &[], 0, &picks), Some(2));
+        assert_eq!(shown_index(&ingots, &[], 0, &picks), Some(1));
+    }
+
+    /// Stacks of one item told apart by components (potions) step one by one.
+    #[test]
+    fn subtypes_step_by_their_components() {
+        let potions = list(&[6, 6, 6]);
+        let comps: Vec<String> = ["{\"p\":\"a\"}", "{\"p\":\"b\"}", "{\"p\":\"c\"}"].iter().map(|s| (*s).to_owned()).collect();
+        let mut picks = Vec::new();
+        step(&mut picks, &potions, &comps, 0, 1);
+        assert_eq!(shown_index(&potions, &comps, 0, &picks), Some(1));
+        step(&mut picks, &potions, &comps, 1, 1);
+        assert_eq!(shown_index(&potions, &comps, 0, &picks), Some(2));
+        assert_eq!(picks.len(), 1);
     }
 }

@@ -109,6 +109,18 @@ pub(crate) fn types() -> usize {
     TYPES.lock().unwrap_or_else(|e| e.into_inner()).len()
 }
 
+/// Every recipe type the server's `recipe/` files name, as Sunrise lists recipes (`crafting_shaped` is
+/// `minecraft:crafting`), for `datapack_sync`: a client's own recipe table holds only vanilla's and the content mods'
+/// recipes, not a native mod's `data/` ones (AE2's crafting, inscriber and charger recipes), so the server sends the
+/// player its recipes of these types and JEI's cards show them. // jeiA
+pub(crate) fn sync_types() -> Vec<String> {
+    let types = TYPES.lock().unwrap_or_else(|e| e.into_inner());
+    let mut out: Vec<String> = types.iter().map(|k| recipe_type(k).to_owned()).collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 pub(crate) fn send(host: &mut dyn ServerHost, player: u128) {
     let table = table(host);
     // A mod message holds at most 30000 bytes: the table goes in parts of whole lines, the first marked "!".
@@ -184,4 +196,20 @@ pub(crate) fn receive(data: &[u8]) {
 
 pub(crate) fn of(recipe: &str) -> Option<i32> {
     DISPLAYS.lock().unwrap_or_else(|e| e.into_inner()).as_ref()?.get(recipe).copied()
+}
+
+// jeiA
+#[cfg(test)]
+mod sync_tests {
+    use super::*;
+
+    /// The files' serializers become the recipe types a client asks for: AE2's own and vanilla's crafting.
+    #[test]
+    fn serializers_sync_as_their_recipe_types() {
+        *TYPES.lock().unwrap() = ["minecraft:crafting_shaped", "minecraft:crafting_shapeless", "minecraft:smithing_trim", "minecraft:smelting", "ae2:inscriber", "ae2:charger"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        assert_eq!(sync_types(), vec!["ae2:charger", "ae2:inscriber", "minecraft:crafting", "minecraft:smelting", "minecraft:smithing"]);
+    }
 }

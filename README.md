@@ -5,12 +5,12 @@
 Just Enough Items (mezz, MIT; see `LICENSE`, `NOTICE`) as a native mod on Sunrise's mod API: Hooks only, no mixins,
 no `[[inject]]`, no game internals. It is a rewrite on Sunrise's own recipe-viewer APIs, not a copy of the Java mod.
 
-- **Mod id** `jei`, **version** 0.5.0.
-- **Game build:** pinned to the Sunrise Nightly of 2026-11-16, game commit
-  `234db8df6210165318b2b604dea50275357bfaeb` (`nightly-2026-11-16-234db8d`), Minecraft 26.3. The launcher compiles the
+- **Mod id** `jei`, **version** 0.5.1.
+- **Game build:** pinned to the Sunrise Nightly of 2026-11-19, game commit
+  `ed3ac19558d8dc1092c431312848cbb58fb01e41` (`nightly-2026-11-19-ed3ac19`), Minecraft 26.3. The launcher compiles the
   mod against that build's prebuilt game; a newer Nightly needs a repinned release.
 - **Install:** in Sunrise's launcher, Mods › Add from GitHub with this repository, or put the release's
-  `jei-0.5.0.smod` in an instance's mods. Native code is not sandboxed: the launcher asks you to trust it.
+  `jei-0.5.1.smod` in an instance's mods. Native code is not sandboxed: the launcher asks you to trust it.
 - **Optional:** `guideme` (the shared guide library), for W over items. JEI works without it.
 
 

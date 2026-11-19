@@ -55,7 +55,7 @@ pub(crate) enum KeyAct {
     Bookmark,
 }
 
-fn key_act(host: &dyn ClientHost, key: &str) -> Option<KeyAct> {
+pub(crate) fn key_act(host: &dyn ClientHost, key: &str) -> Option<KeyAct> {
     if key == bound(host, "show_recipe", "key.keyboard.r") {
         Some(KeyAct::Recipes)
     } else if key == bound(host, "show_uses", "key.keyboard.u") {
@@ -178,11 +178,16 @@ fn ensure_index(host: &dyn ClientHost) {
         + (sources::client::VERSION.load(std::sync::atomic::Ordering::SeqCst) << 48);
     // The recipes can reach the client after the first frames of a world, and `recipes_received` does not always
     // follow: the index is also rebuilt when the number of recipes the client lists changes.
-    let listed: u64 = vanilla::CATEGORIES
-        .iter()
-        .flat_map(|(_, _, _, kinds)| kinds.iter())
-        .map(|k| host.recipes_of_type(k).len() as u64)
-        .sum();
+    // jeiA: the providers' recipe types count too (AE2's `ae2:inscriber`): a mod's recipes that reach the client
+    // after the first index (the server sending the type) used to leave its cards out until the next reload.
+    let mut kinds: Vec<String> =
+        vanilla::CATEGORIES.iter().flat_map(|(_, _, _, kinds)| kinds.iter()).map(|k| (*k).to_owned()).collect();
+    for k in provider::recipe_types() {
+        if !kinds.contains(&k) {
+            kinds.push(k);
+        }
+    }
+    let listed: u64 = kinds.iter().map(|k| host.recipes_of_type(k).len() as u64).sum();
     let received = with(|j| j.received) ^ (listed << 20);
     let built = with(|j| j.built);
     if built == Some((version, received)) && (with(|j| j.from_tabs) || host.creative_tabs().tabs.is_empty()) {
@@ -211,6 +216,26 @@ fn ensure_index(host: &dyn ClientHost) {
     let fuels: Vec<ItemKey> = items.iter().copied().filter(|k| host.item_burn_time(*k).unwrap_or(0) > 0).collect();
     // The panel's entries: potions and enchanted books as one stack per potion and per enchantment level.
     let entries = subtypes::entries(host, &items, &tabs);
+    // Other mods' extra stacks (`api::register_extra_stacks`: AE2's facades), after their anchor items.
+    let mut extra_names: std::collections::HashMap<(ItemKey, String), String> = std::collections::HashMap::new();
+    let groups: Vec<(Option<ItemKey>, Vec<(ItemKey, String)>)> = api::extras(host)
+        .into_iter()
+        .map(|(after, list)| {
+            let stacks = list
+                .into_iter()
+                .filter_map(|e| {
+                    let k = *ids.get(&e.item)?;
+                    if !e.name.is_empty() {
+                        extra_names.insert((k, e.components.clone()), e.name.to_lowercase());
+                    }
+                    Some((k, e.components))
+                })
+                .collect();
+            (ids.get(&after).copied(), stacks)
+        })
+        .collect();
+    let extra_counts = (groups.len(), groups.iter().map(|(_, s)| s.len()).sum::<usize>());
+    let entries = api::place_extras(entries, groups);
     let cx = vanilla::Ctx { host, ids: &ids, fuels: &fuels };
     let mut categories = vanilla::categories(&cx);
     let mut cards = vanilla::cards(&cx);
@@ -224,16 +249,18 @@ fn ensure_index(host: &dyn ClientHost) {
     with(|j| {
         j.subtypes = subtypes;
         j.ids = ids;
-        if j.items != entries {
+        if j.items != entries || j.extra_names != extra_names {
             j.names.clear();
         }
         j.items = entries;
-        j.categories = categories;
+        j.extra_names = extra_names;
+        j.extra_counts = extra_counts;
+        let old = std::mem::replace(&mut j.categories, categories);
         j.cards = cards;
         j.built = Some((version, received));
         j.from_tabs = !shown.is_empty();
-        j.window = None;
-        j.history.clear();
+        // jeiA: the open window stays, found again in the new index (it used to close).
+        j.reopen_after_rebuild(&old);
         j.actions.push(Action::Panel);
     });
 }
@@ -277,6 +304,17 @@ impl Hooks for Mod {
             eprintln!("[jei] recipe types not read: {e:?}");
         }
         sources::server::listen(event);
+    }
+
+    /// jeiA: the server sends each player its recipes of every type in force. A client's own table has only
+    /// vanilla's and the content mods' recipes: without this, no card showed a native mod's recipe (AE2's controller,
+    /// processors and inscriber, `/jei show ae2:controller` found nothing). Other mods' answers add to this one.
+    fn datapack_sync(&self, _host: &mut dyn ServerHost, event: &mut DatapackSyncEvent<'_>) {
+        for t in displays::sync_types() {
+            if !event.recipe_types.contains(&t) {
+                event.recipe_types.push(t);
+            }
+        }
     }
 
     fn player_logged_in(&self, host: &mut dyn ServerHost, event: &mut PlayerLoggedInEvent<'_>) {
@@ -335,6 +373,8 @@ impl Hooks for Mod {
                 Action::Panel => show_panel(host),
                 // The game's viewer transfer: the open mod menu's `menu_transfer` part first, then the crafting grid.
                 Action::Transfer(recipe, max) => host.transfer_recipe_id(&recipe, max),
+                // A mod's own screen: the mod's "+" sends its own payload (`api::register_screen_transfer`).
+                Action::ScreenTransfer(transfer, recipe, max) => transfer(host, &recipe, max),
                 Action::Check(list) => {
                     for (display, recipe) in list {
                         if let Some(check) = host.transfer_recipe_check(&recipe) {
@@ -349,6 +389,10 @@ impl Hooks for Mod {
                     }
                 }
                 Action::SaveBookmarks => with(|j| bookmarks::save(j, host)),
+                // jeiA
+                Action::Say(line) => {
+                    let _ = host.chat_line(Text::literal(line));
+                }
             }
         }
     }
@@ -386,7 +430,9 @@ impl Hooks for Mod {
                         j.actions.push(Action::Give(item, 64));
                     }
                 } else {
-                    j.open(Focus::Item(item), *right);
+                    // A stack with components (a potion, a book, a mod's extra stack) opens on its subtype.
+                    let focus = j.focus_of(item, components);
+                    j.open(focus, *right);
                 }
             }
             PanelEvent::Search(text) => {
@@ -432,17 +478,29 @@ impl Hooks for Mod {
             let [w, h] = event.draw.size();
             event.draw.fill([0.0, 0.0, w, h], DIM);
         } else {
-            // The window draws only over these screens: another screen's tooltips stay.
-            *window::OPEN_RECT.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            // The window draws only over these screens (and a mod's own, which draws itself before the window):
+            // another screen's tooltips stay.
+            if event.screen.id != "mod" {
+                *window::OPEN_RECT.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            }
         }
         Flow::Continue
     }
 
+    /// Last of every mod's (`priority = -100`): a mod that draws its own screen here (AE2's item screens) draws it
+    /// under JEI's window, not over it.
+    #[listener(priority = -100)]
     fn screen_render_post(&self, host: &dyn ClientHost, event: &mut ScreenRenderPostEvent<'_>) {
         let screen = event.screen;
         let container = screen.id == "inventory" || screen.id == "creative";
-        // `jei::api::show` and `/jei show` wait for a container screen: the chat a command came from closes first.
-        let show = if container { api::with(|r| r.show.take()) } else { None };
+        // `jei::api::show` and `/jei show` wait for a container screen (or a mod's own screen, `api::show_stack`):
+        // the chat a command came from closes first.
+        let show = if container || screen.id == "mod" { api::with(|r| r.show.take()) } else { None };
+        // The "+" a mod offers on its own screen now (`api::register_screen_transfer`).
+        let screen_plus = match host.mod_screen().filter(|_| screen.id == "mod") {
+            Some(s) => api::screen_transfers(host, s),
+            None => Vec::new(),
+        };
         // The guide draws under JEI (it is JEI's dependency): keep the bar off it while it is open.
         let mut guide_open = false;
         mod_api::if_installed!(host, guideme, {
@@ -452,11 +510,17 @@ impl Hooks for Mod {
             if !j.in_world {
                 return;
             }
-            if let Some((item, uses)) = show
-                && let Some(k) = j.ids.get(&item).copied()
-            {
-                j.open(Focus::Item(k), uses);
+            // jeiA: a show that finds nothing yet waits for the index to be made again (the server's recipes and
+            // sources arrive a few seconds into a world), and says so in chat if it still finds nothing.
+            let now = j.millis;
+            let gave_up = match show {
+                Some((item, components, uses)) => j.ask_show(item, components, uses, now),
+                None => j.try_show(now),
+            };
+            if let Some(line) = gave_up {
+                j.actions.push(Action::Say(line));
             }
+            j.screen_plus = screen_plus;
             j.creative = screen.id == "creative";
             // The open mod menu's type, for "+" on the categories a mod moves into it (`api::register_transfer`).
             if j.menu.as_deref() != screen.menu {
@@ -518,7 +582,7 @@ impl Hooks for Mod {
                 // The item panel is the game's, and Sunrise pages it with the wheel itself (sunrise#1425).
                 return Flow::Continue;
             }
-            window::scroll(j, event.scroll[1]);
+            window::scroll(j, event.scroll[1], event.screen.mouse); // jeiA: the wheel over a slot steps it
             Flow::Cancel
         })
     }
@@ -573,7 +637,7 @@ impl Hooks for Mod {
     }
 
     fn register_client_commands(&self, _host: &mut dyn ClientHost, event: &mut RegisterClientCommandsEvent<'_>) {
-        for usage in ["jei debug", "jei search [text:text]", "jei show <item:item>", "jei uses <item:item>", "jei bookmarks clear"] {
+        for usage in ["jei debug", "jei search [text:text]", "jei show <item:item>", "jei uses <item:item>", "jei why <item:item>", "jei bookmarks clear"] { // jeiA: why
             event.commands.push(Command::new(usage));
         }
     }
@@ -593,6 +657,14 @@ impl Hooks for Mod {
             let id = item.trim();
             let id = if id.contains(':') { id.to_owned() } else { format!("minecraft:{id}") };
             api::show(&id, rest.starts_with("uses"));
+        } else if let Some(item) = rest.strip_prefix("why ") {
+            // jeiA: why R or U finds (or doesn't find) an item: its key, the cards that make and use it by category.
+            let id = item.trim();
+            let id = if id.contains(':') { id.to_owned() } else { format!("minecraft:{id}") };
+            let line = with(|j| why(j, &id));
+            for l in line {
+                let _ = _host.chat_line(Text::literal(l));
+            }
         } else if rest == "debug" {
             // What "+" needs, for testing: the server's display table and the window's answers.
             let table = displays::DISPLAYS.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|m| m.len());
@@ -616,6 +688,15 @@ impl Hooks for Mod {
                 .iter().map(|k| format!("{k} {}", _host.recipes_of_type(k).len())).collect::<Vec<_>>().join(", ");
             let _ = _host.chat_line(Text::literal(format!("[jei] recipes: {kinds}")));
             let _ = _host.chat_line(Text::literal(format!("[jei] {}", sources::client::status())));
+            // Other mods' extra stacks (`api::register_extra_stacks`): how many functions, stacks and entries.
+            let extras = with(|j| {
+                let with_components = j.items.iter().filter(|(_, c)| !c.is_empty()).count();
+                format!(
+                    "[jei] extra stacks: {} functions gave {} at the last index; entries {} ({} with components, {} named)",
+                    j.extra_counts.0, j.extra_counts.1, j.items.len(), with_components, j.extra_names.len()
+                )
+            });
+            let _ = _host.chat_line(Text::literal(extras));
             let _ = _host.chat_line(Text::literal(line));
         } else if rest == "bookmarks clear" {
             with(|j| {
@@ -638,6 +719,31 @@ impl Hooks for Mod {
     }
 }
 
+/// `/jei why <item>`: whether JEI knows the item, and the cards that make and use it by category. // jeiA
+fn why(j: &state::Jei, id: &str) -> Vec<String> {
+    let Some(k) = j.ids.get(id).copied() else {
+        return vec![format!("[jei] {id}: not an item this client knows")];
+    };
+    let count = |make: bool| -> String {
+        let mut per: Vec<(String, usize)> = Vec::new();
+        for c in j.cards.iter().filter(|c| if make { c.makes(k) } else { c.uses(k) }) {
+            let cat = j.categories.get(c.category).map(|c| c.id.clone()).unwrap_or_default();
+            match per.iter_mut().find(|(n, _)| *n == cat) {
+                Some((_, n)) => *n += 1,
+                None => per.push((cat, 1)),
+            }
+        }
+        if per.is_empty() { "none".to_owned() } else { per.iter().map(|(c, n)| format!("{c} {n}")).collect::<Vec<_>>().join(", ") }
+    };
+    let made = count(true);
+    let used = count(false);
+    vec![
+        format!("[jei] {id}: made by {made}"),
+        format!("[jei] {id}: used by {used}"),
+        format!("[jei] index {:?}, {} cards, waiting show {:?}", j.built, j.cards.len(), j.pending_show.as_ref().map(|p| &p.item)),
+    ]
+}
+
 /// Sends the item list, filtered by the search text, to the game's panel.
 fn show_panel(host: &mut dyn ClientHost) {
     let listed = with(|j| {
@@ -648,7 +754,11 @@ fn show_panel(host: &mut dyn ClientHost) {
         j.listed = listed.clone();
         listed
     });
-    let stacks = listed.into_iter().map(|(item, components)| Stack { item, count: 1, components }).collect();
+    // The panel reads components in the item syntax (`[k=v]`); JEI keeps them as JSON.
+    let stacks = listed
+        .into_iter()
+        .map(|(item, components)| Stack { item, count: 1, components: api::panel_components(&components) })
+        .collect();
     host.panel_items(ID, stacks);
 }
 

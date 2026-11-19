@@ -130,6 +130,11 @@ pub(crate) fn cards(cx: &Ctx<'_>) -> Vec<Card> {
 
 const STEP: f32 = 18.0;
 
+/// The components a recipe file's `result` gives its stack, as compact JSON (`{"minecraft:custom_data":{..}}`).
+pub(crate) fn result_components(json: &Value) -> Option<String> {
+    json["result"].get("components").filter(|c| c.as_object().is_some_and(|o| !o.is_empty())).map(Value::to_string)
+}
+
 /// The recipe's serializer, its file's `type` (`minecraft:crafting_shaped`); `kind` is its recipe type.
 pub(crate) fn serializer(r: &Recipe) -> &str {
     r.json["type"].as_str().unwrap_or(&r.kind)
@@ -194,7 +199,11 @@ fn card(cx: &Ctx<'_>, index: usize, category: &str, r: &Recipe) -> Option<Card> 
                     }
                 }
             }
-            c.slot([95.0, 19.0], Role::Output, result).big = true;
+            let out = c.slot([95.0, 19.0], Role::Output, result);
+            out.big = true;
+            // A result with components (AE2's facade of one block) is drawn as itself, and R on that stack finds
+            // this recipe only (its subtype, `api::register_subtype`).
+            out.components = result_components(json).into_iter().collect();
             Some(c)
         }
         "minecraft:smelting" | "minecraft:blasting" | "minecraft:smoking" | "minecraft:campfire_cooking" => {
@@ -298,5 +307,19 @@ mod trim_tests {
         assert_eq!(trim_material("minecraft:resin_brick"), "minecraft:resin");
         assert_eq!(trim_material("minecraft:diamond"), "minecraft:diamond");
         assert_eq!(trim_json("minecraft:bolt", "minecraft:iron"), r#"{"minecraft:trim":{"material":"minecraft:iron","pattern":"minecraft:bolt"}}"#);
+    }
+
+    /// A crafting result's components (AE2's facade recipes) as its output slot's.
+    #[test]
+    fn crafting_result_components() {
+        let json: Value = mod_api::serde_json::from_str(
+            r#"{"result":{"id":"ae2:facade","count":4,"components":{"minecraft:custom_data":{"item":"minecraft:acacia_log"}}}}"#,
+        )
+        .unwrap();
+        let c = result_components(&json).unwrap();
+        assert_eq!(c, r#"{"minecraft:custom_data":{"item":"minecraft:acacia_log"}}"#);
+        assert_eq!(crate::api::component_value(&c, "minecraft:custom_data").as_deref(), Some(r#"{"item":"minecraft:acacia_log"}"#));
+        assert_eq!(result_components(&mod_api::serde_json::from_str(r#"{"result":{"id":"a:b"}}"#).unwrap()), None);
+        assert_eq!(result_components(&mod_api::serde_json::from_str(r#"{"result":{"id":"a:b","components":{}}}"#).unwrap()), None);
     }
 }

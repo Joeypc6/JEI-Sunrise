@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.1 (2026-11-19)
+
+- Every mod's recipes now show: JEI asks the server for every recipe type, so AE2's, Tinkers', Ender IO's and other
+  native mods' crafting, inscriber, charger and machine recipes reach the client (9193 cards with the test pack, up
+  from 5768).
+- Scroll over a slot that holds several items (a tag such as any rubber, or several outputs) to step through them;
+  slots holding the same list in a recipe step together, and cycling resumes when the pointer leaves the recipe.
+- `/jei show` waits for the recipe index instead of dropping the request, and says so in chat when nothing makes the
+  item; the open window survives an index rebuild. New `/jei why <item>` names what makes and uses an item.
+- A launcher icon (`icon.png`).
+- Pinned to the Nightly of 2026-11-19 (`ed3ac19`).
+
 ## 0.5.0 (2026-11-17)
 
 - New tabs for where things come from, read from the server's data: World Gen (ore height graphs), Block Drops,
