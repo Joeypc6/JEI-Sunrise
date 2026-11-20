@@ -5,12 +5,12 @@
 Just Enough Items (mezz, MIT; see `LICENSE`, `NOTICE`) as a native mod on Sunrise's mod API: Hooks only, no mixins,
 no `[[inject]]`, no game internals. It is a rewrite on Sunrise's own recipe-viewer APIs, not a copy of the Java mod.
 
-- **Mod id** `jei`, **version** 0.5.1.
-- **Game build:** pinned to the Sunrise Nightly of 2026-11-19, game commit
-  `ed3ac19558d8dc1092c431312848cbb58fb01e41` (`nightly-2026-11-19-ed3ac19`), Minecraft 26.3. The launcher compiles the
+- **Mod id** `jei`, **version** 0.5.2.
+- **Game build:** pinned to the Sunrise Nightly of 2026-11-20, game commit
+  `94256510f74e6843754e0a93fd9e4da7e45b1056`, Minecraft 26.3. The launcher compiles the
   mod against that build's prebuilt game; a newer Nightly needs a repinned release.
 - **Install:** in Sunrise's launcher, Mods › Add from GitHub with this repository, or put the release's
-  `jei-0.5.1.smod` in an instance's mods. Native code is not sandboxed: the launcher asks you to trust it.
+  `jei-0.5.2.smod` in an instance's mods. Native code is not sandboxed: the launcher asks you to trust it.
 - **Optional:** `guideme` (the shared guide library), for W over items. JEI works without it.
 
 
@@ -32,7 +32,7 @@ no `[[inject]]`, no game internals. It is a rewrite on Sunrise's own recipe-view
 | "+" transfer into the open crafting grid or a mod's menu | `transfer_recipe_id(recipe, max)`: the open mod menu's `menu_transfer` part first, then the game's grid |
 | "+" red cells for missing items, button state | `transfer_recipe_check(book_id)` (the server's dry run, #2640) |
 | Recipes, ingredients, results | `recipes_of_type`, `recipe_ingredient`, `Ingredient::item_keys`, `RecipeRule` |
-| Names, tooltips (search, `$tooltip`) | `ItemResource::tooltip`, `ClientHost::text_string` |
+| Names, tooltips (search, `$tooltip`) | `ItemResource::tooltip`, `TextHost::text_string` |
 | `#tag` search | `Host::tags()` |
 | R, U, A keys on Options > Controls | `Registrar::register_key_mapping`, read with `mod_key` |
 | Creative give (Shift-click) | `ItemsClientHost::give` |

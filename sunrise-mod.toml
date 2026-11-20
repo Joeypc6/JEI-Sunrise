@@ -1,6 +1,6 @@
 id = "jei"
 name = "JEI"
-version = "0.5.1"
+version = "0.5.2"
 description = "Just Enough Items on Sunrise: the item list and search in the game's own panel, R/U recipes and uses, the recipe window, \"+\" transfer and bookmarks, with a data-driven API for other mods' recipe categories."
 authors = ["mezz (JustEnoughItems)", "Sunrise port: Joeypc6"]
 api = "0.2"
@@ -13,6 +13,6 @@ guideme = { version = "^0.1", optional = true }
 
 [native]
 game = "26.3"
-# Pinned to Sunrise Nightly 2026-11-19 (ed3ac19).
-sunrise = "ed3ac19558d8dc1092c431312848cbb58fb01e41"
+# Pinned to Sunrise Nightly 2026-11-20 (9425651).
+sunrise = "94256510f74e6843754e0a93fd9e4da7e45b1056"
 mixins = "5a64af938ec86b00d53d16a408aabc0038fb3e57"

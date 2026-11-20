@@ -172,7 +172,7 @@ fn shows_something(card: &view::Card) -> bool {
 }
 
 /// Makes the index again when the providers' files or the server's recipes changed.
-fn ensure_index(host: &dyn ClientHost) {
+fn ensure_index(host: &mut dyn ClientHost) {
     let version = provider::VERSION.load(std::sync::atomic::Ordering::SeqCst)
         + (api::with(|r| r.version) << 32)
         + (sources::client::VERSION.load(std::sync::atomic::Ordering::SeqCst) << 48);
@@ -189,8 +189,14 @@ fn ensure_index(host: &dyn ClientHost) {
     }
     let listed: u64 = kinds.iter().map(|k| host.recipes_of_type(k).len() as u64).sum();
     let received = with(|j| j.received) ^ (listed << 20);
-    let built = with(|j| j.built);
-    if built == Some((version, received)) && (with(|j| j.from_tabs) || host.creative_tabs().tabs.is_empty()) {
+    let (built, from_tabs) = with(|j| (j.built, j.from_tabs));
+    let up_to_date = built == Some((version, received));
+    if up_to_date && from_tabs {
+        return;
+    }
+    let catalog = host.creative_tabs(CreativeTabPermissions::Normal).ok();
+    let tabs = catalog.as_deref().map_or(&[][..], |catalog| catalog.tabs.as_slice());
+    if up_to_date && !tabs.iter().any(|t| t.category) {
         return;
     }
     let keys = host.item_keys();
@@ -199,11 +205,9 @@ fn ensure_index(host: &dyn ClientHost) {
     // shows (the knowledge book, the petrified oak slab) is left out, and so is the Operator Utilities tab (command
     // and structure blocks, the debug stick, barrier and light) whatever the player's permissions. Before the tabs
     // load, every item but those.
-    let tabs = host.creative_tabs();
     let shown: std::collections::HashSet<ItemKey> = tabs
-        .tabs
         .iter()
-        .filter(|t| t.id != "minecraft:op_blocks")
+        .filter(|t| t.category && t.id != "minecraft:op_blocks")
         .flat_map(|t| t.display_items.iter().map(|s| s.item()))
         .collect();
     let items: Vec<ItemKey> = keys
@@ -215,7 +219,7 @@ fn ensure_index(host: &dyn ClientHost) {
         .collect();
     let fuels: Vec<ItemKey> = items.iter().copied().filter(|k| host.item_burn_time(*k).unwrap_or(0) > 0).collect();
     // The panel's entries: potions and enchanted books as one stack per potion and per enchantment level.
-    let entries = subtypes::entries(host, &items, &tabs);
+    let entries = subtypes::entries(host, &items, tabs);
     // Other mods' extra stacks (`api::register_extra_stacks`: AE2's facades), after their anchor items.
     let mut extra_names: std::collections::HashMap<(ItemKey, String), String> = std::collections::HashMap::new();
     let groups: Vec<(Option<ItemKey>, Vec<(ItemKey, String)>)> = api::extras(host)
