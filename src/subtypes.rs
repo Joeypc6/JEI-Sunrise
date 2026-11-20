@@ -14,12 +14,12 @@ const BOOK: &str = "minecraft:enchanted_book";
 ///
 /// A potion item lists the potions the creative tabs show it with (`tabs`), as JEI lists the creative tabs' stacks:
 /// no uncraftable potion or tipped arrow. Before the tabs load, every registered potion.
-pub(crate) fn entries(host: &dyn ClientHost, items: &[ItemKey], tabs: &mod_api::CreativeModeTabs) -> Vec<(ItemKey, String)> {
+pub(crate) fn entries(host: &dyn ClientHost, items: &[ItemKey], tabs: &[CreativeModeTabInfo]) -> Vec<(ItemKey, String)> {
     let all: Vec<String> = host.potions().into_iter().map(|p| p.id).collect();
     let shown = |item: ItemKey| -> Vec<String> {
         let listed: Vec<String> = tabs
-            .tabs
             .iter()
+            .filter(|t| t.category)
             .flat_map(|t| t.display_items.iter())
             .filter(|s| s.item() == item)
             .filter_map(potion_of)
