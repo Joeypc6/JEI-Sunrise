@@ -1,11 +1,10 @@
 [package]
 name = "mod-jei"
-version = "0.5.1"
+version = "0.5.2"
 edition = "2024"
 
 [dependencies]
-# The pinned SDK's API crate (`cargo sunrise-mod` fetches it into .sunrise/sdk/). Until Sunrise
-# publishes one, .sunrise/sdk/api is a link to a local sunrise-org/sunrise checkout.
+# The pinned SDK's API crate (`cargo sunrise-mod` fetches it into .sunrise/sdk/).
 sunrise-mod-api = { path = ".sunrise/sdk/api/crates/sunrise-mod-api" }
 # Inflates structure templates (gzipped NBT) for World Gen's "in structures" lines.
 miniz_oxide = "0.8"

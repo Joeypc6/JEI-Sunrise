@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.2 (2026-11-20)
+
+- Updated for Sunrise Nightly 2026-11-20 (`9425651`), using its world-scoped creative catalog for the item list.
+
 ## 0.5.1 (2026-11-19)
 
 - Every mod's recipes now show: JEI asks the server for every recipe type, so AE2's, Tinkers', Ender IO's and other
