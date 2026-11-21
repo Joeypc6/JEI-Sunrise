@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.3 (2026-11-21)
+
+- Fixes rejoining a saved world on the Sunrise Nightly of 2026-11-20: with 0.5.2 the game dropped the connection a few
+  seconds after spawning. JEI no longer asks the server for its recipe types, which this Nightly can't do yet
+  (sunrise-org/sunrise#4060). Until that is fixed, some recipes that native mods define only in their own data may not
+  show; vanilla's, content mods' and Iron Furnaces' recipes do.
+
 ## 0.5.2 (2026-11-20)
 
 - Updated for Sunrise Nightly 2026-11-20 (`9425651`), using its world-scoped creative catalog for the item list.

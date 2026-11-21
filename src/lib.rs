@@ -31,6 +31,8 @@ use state::{Action, with};
 use view::Focus;
 
 pub(crate) const ID: &str = "jei";
+/// Whether `datapack_sync` asks the server for its recipe types (see that hook).
+const SYNC_RECIPE_TYPES: bool = false;
 
 /// A translation, or the fallback when no language has the key.
 /// A screen's background dim (`Screen.renderTransparentBackground`: 16, 16, 16 at 160 of 255).
@@ -313,7 +315,13 @@ impl Hooks for Mod {
     /// jeiA: the server sends each player its recipes of every type in force. A client's own table has only
     /// vanilla's and the content mods' recipes: without this, no card showed a native mod's recipe (AE2's controller,
     /// processors and inscriber, `/jei show ae2:controller` found nothing). Other mods' answers add to this one.
+    ///
+    /// Off for now: on the Nightly of 2026-11-20 any type asked for here made rejoining a saved world drop with
+    /// "End of stream" (sunrise-org/sunrise#4060). Turn it back on when that is fixed.
     fn datapack_sync(&self, _host: &mut dyn ServerHost, event: &mut DatapackSyncEvent<'_>) {
+        if !SYNC_RECIPE_TYPES {
+            return;
+        }
         for t in displays::sync_types() {
             if !event.recipe_types.contains(&t) {
                 event.recipe_types.push(t);

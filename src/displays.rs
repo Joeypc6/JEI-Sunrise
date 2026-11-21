@@ -115,7 +115,10 @@ pub(crate) fn types() -> usize {
 /// player its recipes of these types and JEI's cards show them. // jeiA
 pub(crate) fn sync_types() -> Vec<String> {
     let types = TYPES.lock().unwrap_or_else(|e| e.into_inner());
-    let mut out: Vec<String> = types.iter().map(|k| recipe_type(k).to_owned()).collect();
+    // Not vanilla's: the client has those already, and on the Nightly of 2026-11-20 any type asked for here made a
+    // saved world's rejoin drop with "End of stream" (minecraft:smelting alone did).
+    let mut out: Vec<String> =
+        types.iter().map(|k| recipe_type(k).to_owned()).filter(|t| !t.starts_with("minecraft:")).collect();
     out.sort();
     out.dedup();
     out
@@ -205,11 +208,11 @@ mod sync_tests {
 
     /// The files' serializers become the recipe types a client asks for: AE2's own and vanilla's crafting.
     #[test]
-    fn serializers_sync_as_their_recipe_types() {
+    fn only_mod_recipe_types_sync() {
         *TYPES.lock().unwrap() = ["minecraft:crafting_shaped", "minecraft:crafting_shapeless", "minecraft:smithing_trim", "minecraft:smelting", "ae2:inscriber", "ae2:charger"]
             .iter()
             .map(|s| (*s).to_owned())
             .collect();
-        assert_eq!(sync_types(), vec!["ae2:charger", "ae2:inscriber", "minecraft:crafting", "minecraft:smelting", "minecraft:smithing"]);
+        assert_eq!(sync_types(), vec!["ae2:charger", "ae2:inscriber"]);
     }
 }
