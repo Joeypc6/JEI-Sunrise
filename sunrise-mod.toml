@@ -1,6 +1,6 @@
 id = "jei"
 name = "JEI"
-version = "0.5.5"
+version = "0.5.6"
 description = "Just Enough Items on Sunrise: the item list and search in the game's own panel, R/U recipes and uses, the recipe window, \"+\" transfer and bookmarks, with a data-driven API for other mods' recipe categories."
 authors = ["Sunrise port: Joeypc6", "mezz"]
 api = "0.2"
