@@ -18,10 +18,10 @@ pub(crate) fn ensure_names(jei: &mut Jei, host: &dyn ClientHost) {
             let stack = crate::api::stack_with(*k, 1, components).unwrap_or_else(|| ItemStack::of(*k));
             let lines = ItemResource::of(&stack).tooltip(host, false, false).unwrap_or_default();
             let mut text = lines.into_iter().filter_map(|e| match e {
-                TooltipElement::Text(t, _) => host.text_string(&t).ok(),
+                TooltipElement::Text(t, _) => Some(host.text_string(&t)),
                 _ => None,
             });
-            let mut name = text.next().unwrap_or_else(|| k.id(host)).to_lowercase();
+            let mut name = text.next().unwrap_or_else(|| k.id(host).unwrap_or_default().to_owned()).to_lowercase();
             // A mod's name for its extra stack (`api::ExtraStack::name`): "cable facade - stone".
             if let Some(extra) = jei.extra_names.get(&(*k, components.clone())) {
                 name = joined_name(&name, extra);
@@ -81,7 +81,7 @@ fn tag_items(host: &dyn Host, name: &str) -> Vec<ItemKey> {
     let mut out = Vec::new();
     for c in candidates {
         if let Some(key) = Identifier::parse(&c).ok().and_then(|id| tags.key(&id))
-            && let Some(items) = tags.items(key)
+            && let TagMembers::Members(items) = tags.items(key)
         {
             out.extend(items);
         }
@@ -112,7 +112,7 @@ pub(crate) fn filter(jei: &Jei, host: &dyn Host, query: &str) -> Vec<(ItemKey, S
         .iter()
         .enumerate()
         .filter(|(i, (k, _))| {
-            let id = k.id(host);
+            let id = k.id(host).unwrap_or_default();
             let (name, tip) = jei.names.get(*i).map(|(n, t)| (n.as_str(), t.as_str())).unwrap_or(("", ""));
             groups.iter().zip(&tag_sets).any(|(g, tags)| {
                 g.iter().zip(tags).all(|(term, tag)| {
@@ -124,7 +124,7 @@ pub(crate) fn filter(jei: &Jei, host: &dyn Host, query: &str) -> Vec<(ItemKey, S
                     if matches!(t, "" | "@" | "#" | "$" | "&" | "%") {
                         return true;
                     }
-                    let hit = term_hits(t, &id, name, tip, t.starts_with('#') && tag.contains(k));
+                    let hit = term_hits(t, id, name, tip, t.starts_with('#') && tag.contains(k));
                     hit != neg
                 })
             })

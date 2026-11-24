@@ -19,6 +19,9 @@
 use mod_api::{ClientHost, Host};
 use std::sync::Mutex;
 
+// Extra areas: where a screen draws beyond its window, which JEI's item list keeps clear of (see `extra_areas`).
+pub use crate::extra_areas::{ExtraAreasFn, register_global_extra_areas, register_gui_extra_areas};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SlotRole {
     Input,
@@ -227,6 +230,8 @@ pub(crate) struct Registry {
     pub extras: Vec<(String, String, ExtrasFn)>,
     /// (mod screen, category, whether it applies, the mod's "+"): `register_screen_transfer`.
     pub screen_transfers: Vec<(String, String, ScreenOpenFn, ScreenTransferFn)>,
+    /// (mod menu, its "+" dry run): `register_transfer_state`.
+    pub transfer_states: Vec<(String, TransferStateFn)>,
     pub version: u64,
 }
 
@@ -291,6 +296,48 @@ pub fn register_transfer(menu: &str, category: &str) {
             r.transfers.push((menu.to_owned(), category.to_owned()));
         }
     });
+}
+
+/// How "+" stands for one recipe on a mod's menu, worked out on the client (JEI's `IRecipeTransferError` from a
+/// handler's dry run): the cells to mark while the pointer is on "+", the tooltip, and whether "+" works.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TransferState {
+    /// "+" can't be used (a user-facing error, JEI's `createUserErrorWithTooltip`): drawn inactive, the click ignored.
+    pub blocked: bool,
+    /// Cells to mark (`TransferCell::cell`) and their ARGB colour, drawn over the slot while the pointer is on "+"
+    /// (`IRecipeSlotView.drawHighlight`).
+    pub marks: Vec<(u32, u32)>,
+    /// The tooltip's lines, in place of "Move Items"; `§` colour codes as the game's text takes them. Empty: JEI's.
+    pub lines: Vec<String>,
+    /// An ARGB colour laid over "+" (JEI's tint for a cosmetic error); None for none.
+    pub tint: Option<u32>,
+}
+
+/// One input cell of a recipe card: its number (the recipe's own: width by height for a shaped recipe, else its
+/// ingredients in order) and the items it takes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TransferCell {
+    pub cell: u32,
+    pub items: Vec<mod_api::ItemKey>,
+}
+
+/// A mod's dry run of "+" for a recipe of `category` into its open menu `menu`: the client's own reading of what the
+/// click would do (AE2: what the terminal's network and the inventory hold or can craft). None: plain "+".
+pub type TransferStateFn = fn(&dyn ClientHost, menu: &str, category: &str, cells: &[TransferCell]) -> Option<TransferState>;
+
+/// JEI's dry run for a mod menu's "+" (0.5.5): while a screen of mod menu type `menu` is open, `state` is asked each
+/// frame for every card "+" shows on (`register_transfer`), and its answer marks the cells, sets the tooltip and
+/// blocks or tints "+" as a JEI transfer handler's `IRecipeTransferError` does. The click still goes to the server's
+/// `MenuPart::menu_transfer`, which decides. One function per menu type (a second call replaces the first).
+pub fn register_transfer_state(menu: &str, state: TransferStateFn) {
+    with(|r| {
+        r.transfer_states.retain(|(m, _)| m != menu);
+        r.transfer_states.push((menu.to_owned(), state));
+    });
+}
+
+pub(crate) fn transfer_state_for(menu: &str) -> Option<TransferStateFn> {
+    with(|r| r.transfer_states.iter().find(|(m, _)| m == menu).map(|(_, f)| *f))
 }
 
 /// One more stack for JEI's item list (`register_extra_stacks`): an item with data components, listed beside the

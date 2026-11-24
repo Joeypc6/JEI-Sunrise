@@ -161,12 +161,14 @@ fn card(cx: &Ctx<'_>, index: usize, category: &str, r: &Recipe) -> Option<Card> 
                         }
                     }
                 }
+                let height = pattern.len();
                 for (y, row) in pattern.iter().enumerate() {
                     for (x, ch) in row.chars().enumerate() {
                         let stacks = keys.get(&ch).cloned().unwrap_or_default();
-                        let cell = (y * width + x) as u32;
-                        let slot = c.slot([1.0 + x as f32 * STEP, 1.0 + y as f32 * STEP], Role::Input, stacks);
-                        slot.cell = Some(cell);
+                        let cell = y * width + x;
+                        let at = grid_at(crafting_index(cell, width, height));
+                        let slot = c.slot(at, Role::Input, stacks);
+                        slot.cell = Some(cell as u32);
                     }
                 }
             } else if serializer(r) == "minecraft:crafting_transmute" {
@@ -182,8 +184,7 @@ fn card(cx: &Ctx<'_>, index: usize, category: &str, r: &Recipe) -> Option<Card> 
                 };
                 let side = if list.len() <= 1 { 1 } else if list.len() <= 4 { 2 } else { 3 };
                 for (i, stacks) in list.into_iter().enumerate().take(9) {
-                    let (x, y) = (i % side, i / side);
-                    c.slot([1.0 + x as f32 * STEP, 1.0 + y as f32 * STEP], Role::Input, stacks).cell = Some(i as u32);
+                    c.slot(grid_at(crafting_index(i, side, side)), Role::Input, stacks).cell = Some(i as u32);
                 }
             } else {
                 // A special recipe (map cloning, banner copying, the decorated pot...): no fixed grid to show.
@@ -260,7 +261,7 @@ fn card(cx: &Ctx<'_>, index: usize, category: &str, r: &Recipe) -> Option<Card> 
                 let out = c.slot([91.0, 1.0], Role::Output, pairs.iter().map(|p| (p.0.0, 1)).collect());
                 out.components = pairs
                     .iter()
-                    .map(|(_, (material, _))| trim_json(&pattern, &trim_material(&material.id(cx.host))))
+                    .map(|(_, (material, _))| trim_json(&pattern, &trim_material(material.id(cx.host).unwrap_or_default())))
                     .collect();
             } else {
                 c.slot([19.0, 1.0], Role::Input, base);
@@ -321,5 +322,51 @@ mod trim_tests {
         assert_eq!(crate::api::component_value(&c, "minecraft:custom_data").as_deref(), Some(r#"{"item":"minecraft:acacia_log"}"#));
         assert_eq!(result_components(&mod_api::serde_json::from_str(r#"{"result":{"id":"a:b"}}"#).unwrap()), None);
         assert_eq!(result_components(&mod_api::serde_json::from_str(r#"{"result":{"id":"a:b","components":{}}}"#).unwrap()), None);
+    }
+}
+
+/// `CraftingGridHelper.getCraftingIndex`: where input `i` of a `width` x `height` recipe sits in the 3x3 grid. A
+/// one-wide recipe takes the middle column, a one-tall one the middle row, a single input the centre; a 2x2 sits
+/// top-left.
+fn crafting_index(i: usize, width: usize, height: usize) -> usize {
+    if width == 1 {
+        if height == 3 || height == 2 { i * 3 + 1 } else { 4 }
+    } else if height == 1 {
+        i + 3
+    } else if width == 2 {
+        let mut index = i;
+        if i > 1 {
+            index += 1;
+            if i > 3 {
+                index += 1;
+            }
+        }
+        index
+    } else if height == 2 {
+        i + 3
+    } else {
+        i
+    }
+}
+
+/// A grid cell's slot position in the crafting card.
+fn grid_at(index: usize) -> [f32; 2] {
+    [1.0 + (index % 3) as f32 * STEP, 1.0 + (index / 3) as f32 * STEP]
+}
+
+#[cfg(test)]
+mod crafting_grid_tests {
+    use super::crafting_index;
+
+    /// JEI's placements: a single input in the centre, a one-wide pattern in the middle column, a one-tall one in the
+    /// middle row, a 2x2 top-left, a full grid as it is.
+    #[test]
+    fn inputs_sit_where_jei_puts_them() {
+        assert_eq!(crafting_index(0, 1, 1), 4);
+        assert_eq!([crafting_index(0, 1, 2), crafting_index(1, 1, 2)], [1, 4]);
+        assert_eq!([0, 1, 2].map(|i| crafting_index(i, 3, 1)), [3, 4, 5]);
+        assert_eq!([0, 1, 2, 3].map(|i| crafting_index(i, 2, 2)), [0, 1, 3, 4]);
+        assert_eq!([0, 1, 2, 3, 4, 5].map(|i| crafting_index(i, 3, 2)), [3, 4, 5, 6, 7, 8]);
+        assert_eq!(crafting_index(8, 3, 3), 8);
     }
 }

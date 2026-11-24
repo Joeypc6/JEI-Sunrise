@@ -61,7 +61,7 @@ enum Read {
 }
 
 impl ServerReloadListener for Folder {
-    fn prepare(&self, context: &ServerReloadContext) -> Result<Box<dyn ReloadApply>, ReloadResourceError> {
+    fn prepare(&self, context: &ServerReloadContext) -> Result<Box<dyn FnOnce() + Send + 'static>, ReloadResourceError> {
         let slot = self.0;
         let read = match slot {
             Slot::Structures => Read::Palettes(
@@ -74,7 +74,7 @@ impl ServerReloadListener for Folder {
                     .collect(),
             ),
         };
-        Ok(<dyn ReloadApply>::new(move || {
+        Ok(Box::new(move || {
             let mut data = DATA.lock().unwrap_or_else(|e| e.into_inner());
             let d = data.get_or_insert_with(Data::default);
             match (slot, read) {

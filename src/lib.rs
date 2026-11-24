@@ -15,8 +15,13 @@
 //! window, over the open screen (`screen_render_post` and the `screen_*_pre` input hooks), and the bookmark bar.
 
 pub mod api;
+pub mod extra_areas;
+
+/// `/jei areas` is on: screens outline their extra areas.
+static SHOW_AREAS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 mod sources;
 mod bookmarks;
+mod list;
 mod displays;
 mod provider;
 mod search;
@@ -47,7 +52,30 @@ struct Mod;
 
 /// The bound key of one of our mappings (`key.keyboard.r` by default for `show_recipe`).
 fn bound(host: &dyn ClientHost, name: &str, default: &str) -> String {
-    host.mod_key(ID, name).map(|(k, _)| k).unwrap_or_else(|| default.to_owned())
+    mod_key(host, ID, name).unwrap_or_else(|| default.to_owned())
+}
+
+/// The key `owner`'s mapping `id` is bound to now. The mapping's handle is resolved on first use and again when the
+/// client's registration roster was replaced; None when no such mapping is registered.
+fn mod_key(host: &dyn ClientHost, owner: &str, id: &str) -> Option<String> {
+    static HANDLES: std::sync::Mutex<Vec<(String, String, ModKeyMappingRef)>> = std::sync::Mutex::new(Vec::new());
+    let mut handles = HANDLES.lock().unwrap_or_else(|e| e.into_inner());
+    for _ in 0..2 {
+        let mapping = match handles.iter().find(|(o, i, _)| o == owner && i == id) {
+            Some((_, _, m)) => *m,
+            None => {
+                let m = host.mod_key_mapping(owner, id).ok()?;
+                handles.push((owner.to_owned(), id.to_owned(), m));
+                m
+            }
+        };
+        match mapping.binding(host) {
+            Ok((k, _)) => return Some(k.to_owned()),
+            Err(ModKeyRefusal::Stale) => handles.retain(|(o, i, _)| !(o == owner && i == id)),
+            Err(_) => return None,
+        }
+    }
+    None
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -71,14 +99,14 @@ pub(crate) fn key_act(host: &dyn ClientHost, key: &str) -> Option<KeyAct> {
 
 /// GuideME's open key over an item: its page, when GuideME is installed and has one.
 fn guide(host: &dyn ClientHost, key: &str, item: ItemKey) -> bool {
-    let bound = host.mod_key("guideme", "open").map(|(k, _)| k).unwrap_or_else(|| "key.keyboard.w".to_owned());
+    let bound = mod_key(host, "guideme", "open").unwrap_or_else(|| "key.keyboard.w".to_owned());
     if key != bound {
         return false;
     }
-    let id = item.id(host);
+    let id = item.id(host).unwrap_or_default();
     let mut opened = false;
     mod_api::if_installed!(host, guideme, {
-        opened = guideme::api::open_item(&id);
+        opened = guideme::api::open_item(id);
     });
     let _ = &id;
     opened
@@ -103,19 +131,24 @@ fn creative_focus(host: &dyn ClientHost, j: &state::Jei, at: [f32; 2]) -> Option
     }
     // The creative screen gives the hovered item without its components. Its inventory tab shows the player's own
     // stacks: when every stack of that item there has the same subtype, that is the one under the pointer.
-    let item = host.screen_hovered_item()?;
+    let item = host.screen_hovered_stack()?.item();
     if let Some(component) = j.subtypes.get(&item) {
         let values: std::collections::BTreeSet<String> = host
             .local_player()
-            .and_then(|p| p.inventory(host))
-            .unwrap_or_default()
-            .iter()
-            .filter(|s| s.item() == item)
-            .filter_map(|s| match s.components().and_then(|c| c.as_nbt().get(&component.as_str().into()).cloned()) {
-                Some(Tag::String(v)) => Some(mod_api::serde_json::Value::String(v.to_string_lossy()).to_string()),
-                _ => None,
+            .and_then(|p| {
+                p.with_inventory(host, |view| {
+                    view.iter()
+                        .take_while(|(slot, _)| *slot < 36)
+                        .filter(|(_, s)| s.item() == item)
+                        .filter_map(|(_, s)| s.project())
+                        .filter_map(|s| match s.components().and_then(|c| c.as_nbt().get(&component.as_str().into()).cloned()) {
+                            Some(Tag::String(v)) => Some(mod_api::serde_json::Value::String(v.to_string_lossy()).to_string()),
+                            _ => None,
+                        })
+                        .collect()
+                })
             })
-            .collect();
+            .unwrap_or_default();
         if values.len() == 1 {
             return Some(Focus::Sub(item, component.clone(), values.into_iter().next()?));
         }
@@ -202,7 +235,7 @@ fn ensure_index(host: &mut dyn ClientHost) {
         return;
     }
     let keys = host.item_keys();
-    let ids: std::collections::HashMap<String, ItemKey> = keys.iter().map(|k| (k.id(host), *k)).collect();
+    let ids: std::collections::HashMap<String, ItemKey> = keys.iter().filter_map(|k| Some((k.id(host)?.to_owned(), *k))).collect();
     // The panel lists what the creative inventory does, as JEI's own list is the search tab's items: an item no tab
     // shows (the knowledge book, the petrified oak slab) is left out, and so is the Operator Utilities tab (command
     // and structure blocks, the debug stick, barrier and light) whatever the player's permissions. Before the tabs
@@ -215,8 +248,8 @@ fn ensure_index(host: &mut dyn ClientHost) {
     let items: Vec<ItemKey> = keys
         .into_iter()
         .filter(|k| {
-            let id = k.id(host);
-            id != "minecraft:air" && if shown.is_empty() { !TECHNICAL.contains(&id.as_str()) } else { shown.contains(k) }
+            let id = k.id(host).unwrap_or_default();
+            id != "minecraft:air" && if shown.is_empty() { !TECHNICAL.contains(&id) } else { shown.contains(k) }
         })
         .collect();
     let fuels: Vec<ItemKey> = items.iter().copied().filter(|k| host.item_burn_time(*k).unwrap_or(0) > 0).collect();
@@ -297,14 +330,14 @@ impl Hooks for Mod {
         );
     }
 
-    fn add_client_reload_listeners(&self, _host: &dyn ClientHost, event: &mut AddClientReloadListenersEvent<'_>) {
+    fn add_client_reload_listeners(&self, _context: &dyn ClientReloadListenerContext, event: &mut AddClientReloadListenersEvent<'_>) {
         let (Ok(id), Ok(conv)) = (Identifier::parse("jei:providers"), FileToIdConverter::json("jei")) else { return };
         if let Err(e) = event.listeners.add_listener(id, conv, provider::listener()) {
             eprintln!("[jei] provider files not read: {e:?}");
         }
     }
 
-    fn add_server_reload_listeners(&self, _host: &dyn Host, event: &mut AddServerReloadListenersEvent<'_>) {
+    fn add_server_reload_listeners(&self, _context: &dyn ReloadContext, event: &mut AddServerReloadListenersEvent<'_>) {
         let (Ok(id), Ok(conv)) = (Identifier::parse("jei:recipe_types"), FileToIdConverter::json("recipe")) else { return };
         if let Err(e) = event.listeners.add_listener(id, conv, displays::listener()) {
             eprintln!("[jei] recipe types not read: {e:?}");
@@ -396,7 +429,9 @@ impl Hooks for Mod {
                 }
                 Action::Give(item, count) => {
                     let count = host.max_stack_size(item).unwrap_or(64).min(count);
-                    if let Err(e) = host.give(item, count) {
+                    if let Some(stack) = ItemStack::new(item, count)
+                        && let Err(e) = host.give_stack(&stack)
+                    {
                         eprintln!("[jei] give: {e}");
                     }
                 }
@@ -518,6 +553,9 @@ impl Hooks for Mod {
         mod_api::if_installed!(host, guideme, {
             guide_open = guideme::api::is_open();
         });
+        // The areas the item list keeps clear of, asked before JEI's state is locked: the game's answer includes
+        // JEI's own `screen_exclusion_areas`, which locks it too.
+        let areas = if container { extra_areas::areas(host, screen) } else { Vec::new() };
         with(|j| {
             if !j.in_world {
                 return;
@@ -540,8 +578,35 @@ impl Hooks for Mod {
             }
             j.bar_rect = if container && !guide_open { bookmarks::rect(j, screen.rect) } else { None };
             j.screen_rect = container.then_some(screen.rect);
+            j.targets.clear();
+            // JEI's own item list beside a container screen (`list`), around every extra area.
+            // On the creative inventory too, as JEI's list is (beside its tabs, which the areas keep clear).
+            if container && !guide_open {
+                list::draw(j, &mut *event.draw, screen, &areas, screen.mouse);
+            } else {
+                j.list = None;
+                j.search_focus = false;
+            }
             window::draw(j, host, &mut *event.draw, screen.mouse);
+            // The list's tooltip (the recipe window draws its own, over everything).
+            if j.window.is_none()
+                && j.list.as_ref().is_some_and(|l| state::inside(l.rect, screen.mouse))
+                && matches!(j.target_at(screen.mouse), Some(state::Target::Stack(_) | state::Target::Sub(..)))
+            {
+                window::tooltip(j, host, &mut *event.draw, screen.mouse);
+            }
         });
+        // `/jei areas`: outline every area the item list keeps clear of on this screen, for mod authors checking
+        // what they register (`extra_areas`).
+        if SHOW_AREAS.load(std::sync::atomic::Ordering::Relaxed) {
+            for [x, y, w, h] in extra_areas::areas(host, screen) {
+                let draw = &mut *event.draw;
+                draw.fill([x, y, w, 1.0], 0xFFFF_4040);
+                draw.fill([x, y + h - 1.0, w, 1.0], 0xFFFF_4040);
+                draw.fill([x, y, 1.0, h], 0xFFFF_4040);
+                draw.fill([x + w - 1.0, y, 1.0, h], 0xFFFF_4040);
+            }
+        }
     }
 
     fn screen_exclusion_areas(&self, _host: &dyn ClientHost, event: &mut ScreenExclusionAreasEvent<'_>) {
@@ -549,9 +614,16 @@ impl Hooks for Mod {
     }
 
     fn screen_mouse_button_pressed_pre(&self, host: &dyn ClientHost, event: &mut ScreenMouseButtonPressedPreEvent<'_>) -> Flow {
+        if overlay_screen(event.screen.id) {
+            return Flow::Continue;
+        }
         let shift = host.modifiers().shift();
         let at = event.screen.mouse;
         with(|j| {
+            // JEI's own item list: its items, page buttons and search box.
+            if list::press(j, at, event.button, shift) {
+                return Flow::Cancel;
+            }
             if j.window.is_some() {
                 let over_window = j.window_rect.is_some_and(|r| state::inside(r, at));
                 if !over_window {
@@ -573,6 +645,9 @@ impl Hooks for Mod {
     }
 
     fn screen_mouse_button_released_pre(&self, _host: &dyn ClientHost, event: &mut ScreenMouseButtonReleasedPreEvent<'_>) -> Flow {
+        if overlay_screen(event.screen.id) {
+            return Flow::Continue;
+        }
         let at = event.screen.mouse;
         with(|j| {
             if bookmarks::release(j, at) {
@@ -584,14 +659,22 @@ impl Hooks for Mod {
         })
     }
 
-    fn screen_mouse_dragged_pre(&self, _host: &dyn ClientHost, _event: &mut ScreenMouseDraggedPreEvent<'_>) -> Flow {
+    fn screen_mouse_dragged_pre(&self, _host: &dyn ClientHost, event: &mut ScreenMouseDraggedPreEvent<'_>) -> Flow {
+        if overlay_screen(event.screen.id) {
+            return Flow::Continue;
+        }
         with(|j| if j.window.is_some() || j.dragging.is_some() { Flow::Cancel } else { Flow::Continue })
     }
 
     fn screen_mouse_scrolled_pre(&self, _host: &dyn ClientHost, event: &mut ScreenMouseScrolledPreEvent<'_>) -> Flow {
+        if overlay_screen(event.screen.id) {
+            return Flow::Continue;
+        }
         with(|j| {
+            if list::scroll(j, event.scroll[1], event.screen.mouse) {
+                return Flow::Cancel;
+            }
             if j.window.is_none() {
-                // The item panel is the game's, and Sunrise pages it with the wheel itself (sunrise#1425).
                 return Flow::Continue;
             }
             window::scroll(j, event.scroll[1], event.screen.mouse); // jeiA: the wheel over a slot steps it
@@ -600,28 +683,52 @@ impl Hooks for Mod {
     }
 
     fn screen_key_pressed_pre(&self, host: &dyn ClientHost, event: &mut ScreenKeyPressedPreEvent<'_>) -> Flow {
+        if overlay_screen(event.screen.id) {
+            return Flow::Continue;
+        }
         let act = key_act(host, event.key);
         let at = event.screen.mouse;
         with(|j| {
+            // The list's search box has the keyboard while it has focus.
+            if list::key(j, event.key) {
+                return Flow::Cancel;
+            }
             let over = window::hovered_focus(j, at).or_else(|| window::hovered_fluid(j, at).map(Focus::Fluid))
                 .or_else(|| match j.target_at(at) {
                     Some(state::Target::Bookmark(i)) => j.bookmarks.get(i).map(|k| Focus::Item(*k)),
                     _ => None,
                 });
             if j.window.is_none() {
-                // Keys over the bookmark bar; screen slots and the panel come as panel events.
-                if let (Some(act), Some(f)) = (act, over.filter(|_| j.bar_rect.is_some_and(|r| state::inside(r, at)))) {
-                    act_on(j, act, f);
-                    return Flow::Cancel;
+                // Keys over the bookmark bar and the item list.
+                let listed = match j.target_at(at) {
+                    Some(state::Target::Stack(item)) => Some(Focus::Item(item)),
+                    Some(state::Target::Sub(item, components)) => Some(j.focus_of(item, &components)),
+                    _ => None,
                 }
-                // The creative screen has no panel, so its slots send no panel events: the slot under the pointer
-                // is read here, its components (a subtype) included.
-                if event.screen.id == "creative"
-                    && let Some(act) = act
-                    && let Some(f) = creative_focus(host, j, at)
-                {
-                    act_on(j, act, f);
-                    return Flow::Cancel;
+                .filter(|_| j.list.as_ref().is_some_and(|l| state::inside(l.rect, at)));
+                let bar = over.filter(|_| j.bar_rect.is_some_and(|r| state::inside(r, at)));
+                if let Some(f) = listed.or(bar) {
+                    if let Some(act) = act {
+                        act_on(j, act, f);
+                        return Flow::Cancel;
+                    }
+                    if let Some(item) = f.item()
+                        && guide(host, event.key, item)
+                    {
+                        return Flow::Cancel;
+                    }
+                }
+                // The screen's slot under the pointer (any screen with slots), its components (a subtype) included.
+                if let Some(f) = creative_focus(host, j, at) {
+                    if let Some(act) = act {
+                        act_on(j, act, f);
+                        return Flow::Cancel;
+                    }
+                    if let Some(item) = f.item()
+                        && guide(host, event.key, item)
+                    {
+                        return Flow::Cancel;
+                    }
                 }
                 return Flow::Continue;
             }
@@ -644,12 +751,15 @@ impl Hooks for Mod {
         })
     }
 
-    fn screen_char_typed_pre(&self, _host: &dyn ClientHost, _event: &mut ScreenCharTypedPreEvent<'_>) -> Flow {
-        with(|j| if j.window.is_some() { Flow::Cancel } else { Flow::Continue })
+    fn screen_char_typed_pre(&self, _host: &dyn ClientHost, event: &mut ScreenCharTypedPreEvent<'_>) -> Flow {
+        if overlay_screen(event.screen.id) {
+            return Flow::Continue;
+        }
+        with(|j| if list::typed(j, event.c) || j.window.is_some() { Flow::Cancel } else { Flow::Continue })
     }
 
     fn register_client_commands(&self, _host: &mut dyn ClientHost, event: &mut RegisterClientCommandsEvent<'_>) {
-        for usage in ["jei debug", "jei search [text:text]", "jei show <item:item>", "jei uses <item:item>", "jei why <item:item>", "jei bookmarks clear"] { // jeiA: why
+        for usage in ["jei", "jei debug", "jei search [text:text]", "jei show <item:item>", "jei uses <item:item>", "jei why <item:item>", "jei areas", "jei bookmarks clear"] { // jeiA: why
             event.commands.push(Command::new(usage));
         }
     }
@@ -662,7 +772,7 @@ impl Hooks for Mod {
         let rest = rest.trim();
         if let Some(text) = rest.strip_prefix("search") {
             with(|j| {
-                j.search = text.trim().to_owned();
+                j.set_search(text.trim().to_owned());
                 j.actions.push(Action::Panel);
             });
         } else if let Some(item) = rest.strip_prefix("show ").or_else(|| rest.strip_prefix("uses ")) {
@@ -677,6 +787,10 @@ impl Hooks for Mod {
             for l in line {
                 let _ = _host.chat_line(Text::literal(l));
             }
+        } else if rest == "areas" {
+            // Outlines, on every screen, the areas JEI's item list keeps clear of (`extra_areas`); again to stop.
+            let on = !SHOW_AREAS.fetch_xor(true, std::sync::atomic::Ordering::Relaxed);
+            let _ = _host.chat_line(Text::literal(format!("[jei] extra areas outlined: {on}")));
         } else if rest == "debug" {
             // What "+" needs, for testing: the server's display table and the window's answers.
             let table = displays::DISPLAYS.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|m| m.len());
@@ -710,6 +824,16 @@ impl Hooks for Mod {
             });
             let _ = _host.chat_line(Text::literal(extras));
             let _ = _host.chat_line(Text::literal(line));
+        } else if rest.is_empty() {
+            // `/jei`: the commands menu (`assets/jei/commands/`). JEI's commands are the client's own, so every player
+            // may run them: level 0.
+            let mut opened = false;
+            mod_api::if_installed!(_host, guideme, {
+                opened = guideme::api::open_commands("jei", 0);
+            });
+            if !opened {
+                let _ = _host.chat_line(Text::literal("Install GuideME to open the /jei commands menu."));
+            }
         } else if rest == "bookmarks clear" {
             with(|j| {
                 j.bookmarks.clear();
@@ -767,11 +891,8 @@ fn show_panel(host: &mut dyn ClientHost) {
         listed
     });
     // The panel reads components in the item syntax (`[k=v]`); JEI keeps them as JSON.
-    let stacks = listed
-        .into_iter()
-        .map(|(item, components)| Stack { item, count: 1, components: api::panel_components(&components) })
-        .collect();
-    host.panel_items(ID, stacks);
+    // JEI draws the list itself (`list`), around other mods' panels: the game's panel is left empty.
+    let _ = listed;
 }
 
 
@@ -801,4 +922,13 @@ mod card_tests {
         });
         assert!(shows_something(&fluid));
     }
+}
+
+/// The prompts and dialogs Dev f8aa80e's screen input Pre hooks newly reach (debt-59-mounted-screen-widgets): the hooks
+/// leave them alone, as on 7cfdf81, where these hooks never saw them.
+fn overlay_screen(id: &str) -> bool {
+    matches!(
+        id,
+        "command_prompt" | "link_prompt" | "code_of_conduct" | "server_pack_prompt" | "dialog" | "book_view" | "book_edit" | "book_sign" | "lectern" | "sign_editor"
+    )
 }

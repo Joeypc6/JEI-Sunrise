@@ -1,0 +1,36 @@
+summary = "Look up the recipes and uses of every item, from an item list beside your inventory."
+description = """
+Look up how any item is made and what it is used for, from an item list beside your inventory.
+
+A port of [Just Enough Items](https://github.com/mezz/JustEnoughItems) by mezz to [Sunrise](https://playsunrise.net) (Minecraft Java 26.3), under the original's licence (MIT, in `LICENSE`; see `NOTICE`). One native mod on Sunrise's mod API; the code is a rewrite, not the Java mod.
+
+What it does:
+
+- An item list with search beside container screens, with `@mod`, `#tag` and `$tooltip` searches.
+- R shows an item's recipes and U its uses; the recipe window pages through every category that has it.
+- The "+" button moves a recipe's items into the open crafting grid, or into another mod's machine that supports it, and marks missing items in red.
+- Bookmarks, and Shift-click to take an item in creative mode.
+- Pages for world generation, loot tables, block drops and mob drops.
+- Other mods add their own recipe categories through JEI's API (AE2, Iron Furnaces, Tinkers' Construct and Hostile Neural Networks do).
+- With the optional `guideme` library, W over an item opens its guide page.
+"""
+authors = ["Sunrise port: Joeypc6", "mezz"]
+homepage = "https://github.com/Joeypc6/JEI-Sunrise"
+issues = "https://github.com/Joeypc6/JEI-Sunrise/issues"
+categories = ["utility"]
+
+[[screenshots]]
+path = "page/1-crafting.jpg"
+caption = "A crafting recipe in the recipe window."
+
+[[screenshots]]
+path = "page/2-search.jpg"
+caption = "The item list filtered with @ae2."
+
+[[screenshots]]
+path = "page/3-uses.jpg"
+caption = "An iron ingot's uses across mods."
+
+[[screenshots]]
+path = "page/4-worldgen.jpg"
+caption = "World generation: where an ore is found."

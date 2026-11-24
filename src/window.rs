@@ -138,7 +138,7 @@ fn big_frame(draw: &mut dyn DrawContext, at: [f32; 2]) {
     draw.fill([at[0] + 1.0, at[1] + 1.0, 24.0, 24.0], 0xFF8B_8B8B);
 }
 
-fn button(draw: &mut dyn DrawContext, r: [f32; 4], hover: bool, enabled: bool) {
+pub(crate) fn button(draw: &mut dyn DrawContext, r: [f32; 4], hover: bool, enabled: bool) {
     // JEI's button: a dark outline, a light bevel, a grey face (blue-tinted under the pointer).
     let [x, y, w, h] = r;
     draw.fill([x, y, w, h], 0xFF00_0000);
@@ -259,8 +259,8 @@ fn card_height(card: &Card, draw: &dyn DrawContext, host: &dyn ClientHost) -> f3
     h
 }
 
+/// The recipe window over the screen. The caller clears `jei.targets` first (the item list adds its own before this).
 pub(crate) fn draw(jei: &mut Jei, host: &dyn ClientHost, draw: &mut dyn DrawContext, mouse: [f32; 2]) {
-    jei.targets.clear();
     jei.window_rect = None;
     *OPEN_RECT.lock().unwrap_or_else(|e| e.into_inner()) = None;
     bookmarks::draw(jei, host, draw, mouse);
@@ -428,14 +428,36 @@ fn draw_card(jei: &mut Jei, host: &dyn ClientHost, draw: &mut dyn DrawContext, c
             }
             plus = Some((Some(display), check.result));
         }
-    } else if jei.menu.as_deref().is_some_and(|menu| crate::api::transfers_into(menu, &jei.categories[card.category].id)) {
-        // A mod moves this category into the open menu (`menu_transfer`). There is no dry run for a mod menu, so
-        // "+" is offered and the server's part answers the click.
+    } else if let Some(menu) = jei.menu.clone().filter(|menu| crate::api::transfers_into(menu, &jei.categories[card.category].id)) {
+        // A mod moves this category into the open menu (`menu_transfer`). The server's part answers the click; the
+        // mod's client-side dry run (`api::register_transfer_state`), if it has one, marks the cells and the tooltip.
+        let _ = menu;
         plus = Some((None, RecipeTransferResult::Moves));
     }
+    // The open mod menu's own dry run of "+" (`api::register_transfer_state`), whichever way "+" came: a mod menu's
+    // category, or the game's transfer into a mod menu that takes crafting recipes (AE2's crafting terminal).
+    jei.plus_states.remove(&card.recipe);
+    if plus.is_some()
+        && screen_plus.is_none()
+        && let Some(menu) = jei.menu.clone()
+        && let Some(state_fn) = crate::api::transfer_state_for(&menu)
+    {
+        let category = jei.categories[card.category].id.clone();
+        let cells: Vec<crate::api::TransferCell> = card
+            .slots
+            .iter()
+            .filter(|s| s.role == Role::Input && !s.stacks.is_empty())
+            .filter_map(|s| Some(crate::api::TransferCell { cell: s.cell?, items: s.stacks.iter().map(|(k, _)| *k).collect() }))
+            .collect();
+        if let Some(state) = state_fn(host, &menu, &category, &cells) {
+            jei.plus_states.insert(card.recipe.clone(), state);
+        }
+    }
+    let marks: Vec<(u32, u32)> = jei.plus_states.get(&card.recipe).map(|s| s.marks.clone()).unwrap_or_default();
     // JEI marks the missing ingredients only while the pointer is on "+".
     let plus_rect = [x + card.size[0] + PAD + 3.0, y + h + PAD - 13.0, 13.0, 13.0];
-    if plus.is_none() || !inside(plus_rect, mouse) {
+    let on_plus = plus.is_some() && inside(plus_rect, mouse);
+    if !on_plus {
         missing.clear();
     }
     for (si, s) in card.slots.iter().enumerate() {
@@ -447,6 +469,12 @@ fn draw_card(jei: &mut Jei, host: &dyn ClientHost, draw: &mut dyn DrawContext, c
         }
         if s.cell.is_some_and(|c| missing.contains(&c)) && !s.stacks.is_empty() {
             draw.fill([sx[0] + 1.0, sx[1] + 1.0, 16.0, 16.0], 0x80FF_0000);
+        }
+        if on_plus
+            && !s.stacks.is_empty()
+            && let Some(&(_, colour)) = s.cell.and_then(|c| marks.iter().find(|(m, _)| *m == c))
+        {
+            draw.fill([sx[0] + 1.0, sx[1] + 1.0, 16.0, 16.0], colour);
         }
         // jeiA: the stack shown is the recipe's pick when it holds one, else the cycle's; the tooltip, R/U and "+"
         // all take that one.
@@ -577,9 +605,13 @@ fn draw_card(jei: &mut Jei, host: &dyn ClientHost, draw: &mut dyn DrawContext, c
     }
     if let Some((display, result)) = plus {
         let r = plus_rect;
+        let state = jei.plus_states.get(&card.recipe);
         let ok = result == RecipeTransferResult::Moves;
-        let usable = ok || result == RecipeTransferResult::Missing;
+        let usable = (ok || result == RecipeTransferResult::Missing) && !state.is_some_and(|s| s.blocked);
         button(draw, r, inside(r, mouse) && usable, usable);
+        if let Some(tint) = state.and_then(|s| s.tint).filter(|_| usable) {
+            draw.fill([r[0] + 1.0, r[1] + 1.0, r[2] - 2.0, r[3] - 2.0], tint);
+        }
         let tw = draw.text_width("+");
         draw.text("+", [r[0] + ((r[2] - tw) / 2.0).floor() + 0.5, r[1] + 3.0], if usable { 0xFFFF_FFFF } else { 0xFFA0_A0A0 }, true);
         jei.targets.push((r, Target::Plus(display, card.recipe.clone(), screen_plus)));
@@ -587,7 +619,7 @@ fn draw_card(jei: &mut Jei, host: &dyn ClientHost, draw: &mut dyn DrawContext, c
 }
 
 /// The game's tooltip of the stack under the pointer, with JEI's lines (the mod's name, the keys).
-fn tooltip(jei: &Jei, host: &dyn ClientHost, draw: &mut dyn DrawContext, mouse: [f32; 2]) {
+pub(crate) fn tooltip(jei: &Jei, host: &dyn ClientHost, draw: &mut dyn DrawContext, mouse: [f32; 2]) {
     let Some(target) = jei.target_at(mouse) else { return };
     let mut lines: Vec<Text> = Vec::new();
     match target {
@@ -603,7 +635,7 @@ fn tooltip(jei: &Jei, host: &dyn ClientHost, draw: &mut dyn DrawContext, mouse: 
                     lines.push(t);
                 }
             }
-            let id = item.id(host);
+            let id = item.id(host).unwrap_or_default();
             let ns = id.split(':').next().unwrap_or("minecraft");
             lines.push(Text::literal(format!("§9§o{}", mod_name(host, ns))));
             // jeiA: a slot with alternatives says how to step through them, and which one this is.
@@ -621,6 +653,11 @@ fn tooltip(jei: &Jei, host: &dyn ClientHost, draw: &mut dyn DrawContext, mouse: 
         Target::Hover(own) => {
             for l in own {
                 lines.push(Text::literal(host.translate(&l).unwrap_or(l)));
+            }
+        }
+        Target::Plus(_, recipe, _) if jei.plus_states.get(&recipe).is_some_and(|s| !s.lines.is_empty()) => {
+            for l in &jei.plus_states[&recipe].lines {
+                lines.push(Text::literal(l.clone()));
             }
         }
         Target::Plus(display, _, _) => {
@@ -720,6 +757,8 @@ pub(crate) fn click(jei: &mut Jei, at: [f32; 2], button: i32, shift: bool) -> bo
             if let Some(transfer) = screen_plus {
                 jei.actions.push(Action::ScreenTransfer(transfer, recipe, shift));
                 jei.close();
+            } else if jei.plus_states.get(&recipe).is_some_and(|s| s.blocked) {
+                // The mod's dry run blocks "+" (nothing to move): the click does nothing, as JEI's inactive button.
             } else if display.is_none_or(|d| jei.checks.get(&d).is_some_and(|c| c.result == RecipeTransferResult::Moves)) {
                 jei.actions.push(Action::Transfer(recipe, shift));
                 jei.close();
@@ -729,6 +768,8 @@ pub(crate) fn click(jei: &mut Jei, at: [f32; 2], button: i32, shift: bool) -> bo
         // A card's own tooltip area takes the click as the card does.
         Some(Target::Hover(_)) => return true,
         Some(Target::Bookmark(_)) | Some(Target::Close) | Some(Target::Back) => return false,
+        // The item list's own controls: `list::press` takes them before the window is asked.
+        Some(Target::ListPrev) | Some(Target::ListNext) | Some(Target::ListSearch) => return false,
         // A card's own tooltip area: nothing to press.
         Some(Target::Hover(_)) => return true,
         None => {

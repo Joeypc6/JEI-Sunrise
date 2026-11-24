@@ -27,7 +27,7 @@ pub(crate) fn load(jei: &mut Jei, host: &dyn Host) {
 }
 
 pub(crate) fn save(jei: &Jei, host: &dyn Host) {
-    let text: String = jei.bookmarks.iter().map(|k| format!("{}\n", k.id(host))).collect();
+    let text: String = jei.bookmarks.iter().map(|k| format!("{}\n", k.id(host).unwrap_or_default())).collect();
     if let Ok(path) = ConfigPath::new(FILE)
         && let Err(e) = host.config_files().write(&path, text.as_bytes())
     {

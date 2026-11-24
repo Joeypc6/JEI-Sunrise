@@ -22,7 +22,7 @@ pub(crate) static VERSION: std::sync::atomic::AtomicU64 = std::sync::atomic::Ato
 pub(crate) struct Listener;
 
 impl ClientReloadListener for Listener {
-    fn prepare(&self, context: &ClientReloadContext) -> Result<Box<dyn ReloadApply>, ReloadResourceError> {
+    fn prepare(&self, context: &ClientReloadContext) -> Result<Box<dyn FnOnce() + Send + 'static>, ReloadResourceError> {
         let mut files = Vec::new();
         for id in context.list() {
             let Some(bytes) = context.read(id) else { continue };
@@ -32,7 +32,7 @@ impl ClientReloadListener for Listener {
             }
         }
         files.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(<dyn ReloadApply>::new(move || {
+        Ok(Box::new(move || {
             *FILES.lock().unwrap_or_else(|e| e.into_inner()) = files;
             VERSION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }))

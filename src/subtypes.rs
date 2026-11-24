@@ -32,8 +32,8 @@ pub(crate) fn entries(host: &dyn ClientHost, items: &[ItemKey], tabs: &[Creative
     let books: Vec<(String, u32)> = host.enchantments().into_iter().map(|e| (e.id, e.max_level)).collect();
     let mut out = Vec::with_capacity(items.len() + potions.len() * POTION_ITEMS.len() + books.iter().map(|(_, n)| *n as usize).sum::<usize>());
     for k in items {
-        let id = k.id(host);
-        if POTION_ITEMS.contains(&id.as_str()) && !potions.is_empty() {
+        let id = k.id(host).unwrap_or_default();
+        if POTION_ITEMS.contains(&id) && !potions.is_empty() {
             out.extend(shown(*k).iter().map(|p| (*k, potion_json(p))));
         } else if id == BOOK && !books.is_empty() {
             out.extend(books.iter().flat_map(|(e, most)| (1..=*most).map(move |level| (*k, book_json(e, level)))));

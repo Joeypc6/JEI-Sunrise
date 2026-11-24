@@ -100,6 +100,10 @@ pub(crate) enum Target {
     Close,
     Back,
     Title,
+    /// The item list's page buttons and search box (`list`).
+    ListPrev,
+    ListNext,
+    ListSearch,
 }
 
 #[derive(Default)]
@@ -139,6 +143,14 @@ pub(crate) struct Jei {
     pub menu: Option<String>,
     /// The server's answers for "+": display id -> (result, missing cells).
     pub checks: HashMap<i32, RecipeTransferCheck>,
+    /// A mod's dry run of "+" (`api::register_transfer_state`) for each card drawn this frame, by recipe id.
+    pub plus_states: HashMap<String, crate::api::TransferState>,
+    /// The item list JEI draws beside the screen (`list`), as laid out this frame; None with no list shown.
+    pub list: Option<crate::list::Layout>,
+    /// The item list's page.
+    pub list_page: usize,
+    /// Whether the list's search box has the keyboard.
+    pub search_focus: bool,
     /// The targets drawn last frame, front last.
     pub targets: Vec<([f32; 4], Target)>,
     /// The recipe slots drawn last frame (the wheel steps through their alternatives). // jeiA
@@ -173,6 +185,15 @@ pub(crate) fn inside(r: [f32; 4], at: [f32; 2]) -> bool {
 }
 
 impl Jei {
+    /// A new search: the list shows its first page of matches (made again on the next frame, `Action::Panel`).
+    pub(crate) fn set_search(&mut self, text: String) {
+        if self.search != text {
+            self.search = text;
+            self.list_page = 0;
+            self.actions.push(Action::Panel);
+        }
+    }
+
     pub(crate) fn target_at(&self, at: [f32; 2]) -> Option<Target> {
         self.targets.iter().rev().find(|(r, _)| inside(*r, at)).map(|(_, t)| t.clone())
     }

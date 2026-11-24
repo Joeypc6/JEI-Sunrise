@@ -21,7 +21,7 @@ pub(crate) static DISPLAYS: Mutex<Option<HashMap<String, i32>>> = Mutex::new(Non
 pub(crate) struct Types;
 
 impl ServerReloadListener for Types {
-    fn prepare(&self, context: &ServerReloadContext) -> Result<Box<dyn ReloadApply>, ReloadResourceError> {
+    fn prepare(&self, context: &ServerReloadContext) -> Result<Box<dyn FnOnce() + Send + 'static>, ReloadResourceError> {
         let mut types = BTreeSet::new();
         for id in context.list() {
             if let Some(kind) = context
@@ -32,7 +32,7 @@ impl ServerReloadListener for Types {
                 types.insert(if kind.contains(':') { kind } else { format!("minecraft:{kind}") });
             }
         }
-        Ok(<dyn ReloadApply>::new(move || *TYPES.lock().unwrap_or_else(|e| e.into_inner()) = types))
+        Ok(Box::new(move || *TYPES.lock().unwrap_or_else(|e| e.into_inner()) = types))
     }
 }
 
